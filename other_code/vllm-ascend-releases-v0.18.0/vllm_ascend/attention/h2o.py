@@ -1,0 +1,242 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math
+from typing import Any, Sequence
+
+import torch
+
+
+class H2OBlockPruner:
+    """Build compact decode block tables for Ascend paged KV attention.
+
+    H2O selects high-score historical tokens plus recent tokens. Ascend FIA/PA
+    kernels consume paged KV through block tables and do not expose attention
+    probabilities to Python, so this pruner applies the same heavy+recent budget
+    at block granularity. When request ids are available, it keeps a lightweight
+    per-request block score so blocks that have been retained repeatedly can stay
+    in the heavy set after they leave the recent window.
+    """
+
+    def __init__(self):
+        self._scores: dict[Any, list[float]] = {}
+        self._last_seq_lens: dict[Any, int] = {}
+
+    def apply(
+        self,
+        *,
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_size: int,
+        config: Any,
+        request_ids: Sequence[Any] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        if block_tables is None or seq_lens is None:
+            seq_lens_list = [] if seq_lens is None else [int(x) for x in seq_lens.tolist()]
+            return block_tables, seq_lens, seq_lens_list
+
+        seq_lens_list = [int(x) for x in seq_lens.tolist()]
+        if block_size <= 0:
+            return block_tables, seq_lens, seq_lens_list
+
+        new_block_tables = torch.zeros_like(block_tables)
+        new_seq_lens = torch.empty_like(seq_lens)
+        changed = False
+
+        for req_index, seq_len in enumerate(seq_lens_list):
+            if seq_len <= 0:
+                new_seq_lens[req_index] = 0
+                continue
+
+            valid_blocks = math.ceil(seq_len / block_size)
+            if seq_len < config.min_seq_len:
+                self._copy_original_row(
+                    new_block_tables,
+                    block_tables,
+                    new_seq_lens,
+                    req_index,
+                    seq_len,
+                )
+                continue
+
+            heavy_blocks, recent_blocks = self._resolve_budgets(seq_len, valid_blocks, block_size, config)
+            if config.max_blocks is not None:
+                recent_blocks = min(recent_blocks, config.max_blocks)
+                heavy_blocks = min(heavy_blocks, max(config.max_blocks - recent_blocks, 0))
+
+            if heavy_blocks + recent_blocks >= valid_blocks:
+                self._copy_original_row(
+                    new_block_tables,
+                    block_tables,
+                    new_seq_lens,
+                    req_index,
+                    seq_len,
+                )
+                self._update_scores(req_index, seq_len, valid_blocks, range(valid_blocks), config, request_ids)
+                continue
+
+            selected = self._select_blocks(req_index, seq_len, valid_blocks, heavy_blocks, recent_blocks, request_ids)
+            if not selected:
+                selected = [valid_blocks - 1]
+            elif selected[-1] != valid_blocks - 1:
+                selected.append(valid_blocks - 1)
+            selected = sorted(set(selected))
+
+            selected_tensor = torch.tensor(selected, dtype=torch.long, device=block_tables.device)
+            selected_blocks = block_tables[req_index].index_select(0, selected_tensor)
+            new_block_tables[req_index, : selected_blocks.shape[0]] = selected_blocks
+
+            compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
+            new_seq_lens[req_index] = compact_len
+            seq_lens_list[req_index] = compact_len
+            changed = True
+            self._update_scores(req_index, seq_len, valid_blocks, selected, config, request_ids)
+
+        if not changed:
+            return block_tables, seq_lens, [int(x) for x in seq_lens.tolist()]
+        return new_block_tables, new_seq_lens, seq_lens_list
+
+    @staticmethod
+    def _copy_original_row(
+        new_block_tables: torch.Tensor,
+        block_tables: torch.Tensor,
+        new_seq_lens: torch.Tensor,
+        req_index: int,
+        seq_len: int,
+    ) -> None:
+        new_block_tables[req_index] = block_tables[req_index]
+        new_seq_lens[req_index] = seq_len
+
+    @staticmethod
+    def _resolve_budgets(
+        seq_len: int,
+        valid_blocks: int,
+        block_size: int,
+        config: Any,
+    ) -> tuple[int, int]:
+        heavy_blocks = H2OBlockPruner._blocks_from_budget(
+            seq_len,
+            valid_blocks,
+            block_size,
+            config.heavy_ratio,
+            config.heavy_blocks,
+        )
+        recent_blocks = H2OBlockPruner._blocks_from_budget(
+            seq_len,
+            valid_blocks,
+            block_size,
+            config.recent_ratio,
+            config.recent_blocks,
+        )
+        return heavy_blocks, recent_blocks
+
+    @staticmethod
+    def _blocks_from_budget(
+        seq_len: int,
+        valid_blocks: int,
+        block_size: int,
+        ratio: float,
+        explicit_blocks: int | None,
+    ) -> int:
+        if explicit_blocks is not None:
+            return min(explicit_blocks, valid_blocks)
+        if ratio <= 0:
+            return 0
+        token_budget = max(1, int(seq_len * ratio))
+        return min(math.ceil(token_budget / block_size), valid_blocks)
+
+    def _select_blocks(
+        self,
+        req_index: int,
+        seq_len: int,
+        valid_blocks: int,
+        heavy_blocks: int,
+        recent_blocks: int,
+        request_ids: Sequence[Any] | None,
+    ) -> list[int]:
+        recent_start = max(valid_blocks - recent_blocks, 0)
+        recent = list(range(recent_start, valid_blocks))
+        heavy_candidate_end = recent_start
+        if heavy_blocks <= 0 or heavy_candidate_end <= 0:
+            return recent
+
+        scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
+        if scores is None:
+            heavy = list(range(min(heavy_blocks, heavy_candidate_end)))
+        else:
+            ranked = sorted(range(heavy_candidate_end), key=lambda index: (-scores[index], index))
+            heavy = sorted(ranked[:heavy_blocks])
+        return heavy + recent
+
+    def _get_scores(
+        self,
+        req_index: int,
+        seq_len: int,
+        valid_blocks: int,
+        request_ids: Sequence[Any] | None,
+    ) -> list[float] | None:
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is None:
+            return None
+
+        last_seq_len = self._last_seq_lens.get(request_id)
+        if last_seq_len is not None and seq_len < last_seq_len:
+            self._scores.pop(request_id, None)
+
+        scores = self._scores.setdefault(request_id, [])
+        if len(scores) < valid_blocks:
+            scores.extend([0.0] * (valid_blocks - len(scores)))
+        elif len(scores) > valid_blocks:
+            del scores[valid_blocks:]
+        self._last_seq_lens[request_id] = seq_len
+        return scores
+
+    def _update_scores(
+        self,
+        req_index: int,
+        seq_len: int,
+        valid_blocks: int,
+        selected: Sequence[int],
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> None:
+        scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
+        if scores is None:
+            return
+        if config.score_decay < 1.0:
+            for index, score in enumerate(scores):
+                scores[index] = score * config.score_decay
+        for index in selected:
+            scores[index] += 1.0
+
+    @staticmethod
+    def _get_request_id(req_index: int, request_ids: Sequence[Any] | None) -> Any | None:
+        if request_ids is None or req_index >= len(request_ids):
+            return None
+        return request_ids[req_index]
+
+    @staticmethod
+    def _selected_token_count(
+        selected: Sequence[int],
+        seq_len: int,
+        valid_blocks: int,
+        block_size: int,
+    ) -> int:
+        last_block_tokens = seq_len - (valid_blocks - 1) * block_size
+        total = 0
+        for block_index in selected:
+            total += last_block_tokens if block_index == valid_blocks - 1 else block_size
+        return total
