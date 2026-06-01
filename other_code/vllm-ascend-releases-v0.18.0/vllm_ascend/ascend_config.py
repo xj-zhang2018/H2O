@@ -390,6 +390,9 @@ class H2OConfig:
         self.max_blocks = h2o_config.get("max_blocks", None)
         self.min_seq_len = int(h2o_config.get("min_seq_len", 0))
         self.score_decay = float(h2o_config.get("score_decay", 1.0))
+        self.debug_log = bool(h2o_config.get("debug_log", False))
+        self.debug_interval = int(h2o_config.get("debug_interval", 1))
+        self.debug_sample_requests = int(h2o_config.get("debug_sample_requests", 3))
 
         self._validate()
         if self.enabled:
@@ -398,7 +401,8 @@ class H2OConfig:
                 f"heavy_ratio={self.heavy_ratio}, recent_ratio={self.recent_ratio}, "
                 f"heavy_blocks={self.heavy_blocks}, recent_blocks={self.recent_blocks}, "
                 f"max_blocks={self.max_blocks}, min_seq_len={self.min_seq_len}, "
-                f"score_decay={self.score_decay}."
+                f"score_decay={self.score_decay}, debug_log={self.debug_log}, "
+                f"debug_interval={self.debug_interval}."
             )
 
     @staticmethod
@@ -422,6 +426,10 @@ class H2OConfig:
             raise ValueError("h2o_config.min_seq_len must be non-negative")
         if not 0 < self.score_decay <= 1.0:
             raise ValueError("h2o_config.score_decay must be in the range (0, 1]")
+        if self.debug_interval <= 0:
+            raise ValueError("h2o_config.debug_interval must be greater than 0")
+        if self.debug_sample_requests < 0:
+            raise ValueError("h2o_config.debug_sample_requests must be non-negative")
         if not self.enabled:
             return
         heavy_budget_enabled = (

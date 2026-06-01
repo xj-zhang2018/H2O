@@ -23,6 +23,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -339,20 +340,25 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             return
         if attn_metadata.block_tables is None or attn_metadata.seq_lens is None:
             return
+        try:
+            h2o_config = get_ascend_config().h2o_config
+        except RuntimeError:
+            return
+        if not h2o_config.enabled:
+            return
+
         hf_text_config = getattr(self.model_config, "hf_text_config", None)
         if getattr(hf_text_config, "sliding_window", None) is not None:
+            if h2o_config.debug_log:
+                logger.info_once("[H2O] skipped because sliding-window attention is enabled.")
             return
         if (
             getattr(hf_text_config, "alibi", False)
             or getattr(hf_text_config, "alibi_bias_max", None) is not None
             or getattr(hf_text_config, "position_embedding_type", None) == "alibi"
         ):
-            return
-        try:
-            h2o_config = get_ascend_config().h2o_config
-        except RuntimeError:
-            return
-        if not h2o_config.enabled:
+            if h2o_config.debug_log:
+                logger.info_once("[H2O] skipped because ALiBi positional bias is enabled.")
             return
 
         block_size = getattr(self.kv_cache_spec, "block_size", self.vllm_config.cache_config.block_size)

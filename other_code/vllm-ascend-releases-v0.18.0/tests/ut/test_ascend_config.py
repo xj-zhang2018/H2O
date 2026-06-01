@@ -40,6 +40,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertFalse(ascend_config.h2o_config.enabled)
+        self.assertFalse(ascend_config.h2o_config.debug_log)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -60,7 +61,13 @@ class TestAscendConfig(TestBase):
             },
             "multistream_overlap_shared_expert": True,
             "eplb_config": {"num_redundant_experts": 2},
-            "h2o_config": {"enabled": True, "heavy_blocks": 2, "recent_blocks": 6},
+            "h2o_config": {
+                "enabled": True,
+                "heavy_blocks": 2,
+                "recent_blocks": 6,
+                "debug_log": True,
+                "debug_interval": 16,
+            },
             "refresh": True,
             "enable_kv_nz": False,
         }
@@ -74,6 +81,8 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.h2o_config.enabled)
         self.assertEqual(ascend_config.h2o_config.heavy_blocks, 2)
         self.assertEqual(ascend_config.h2o_config.recent_blocks, 6)
+        self.assertTrue(ascend_config.h2o_config.debug_log)
+        self.assertEqual(ascend_config.h2o_config.debug_interval, 16)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
 

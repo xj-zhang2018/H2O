@@ -15,9 +15,11 @@
 # limitations under the License.
 
 import math
+import os
 from typing import Any, Sequence
 
 import torch
+from vllm.logger import logger
 
 
 class H2OBlockPruner:
@@ -34,6 +36,8 @@ class H2OBlockPruner:
     def __init__(self):
         self._scores: dict[Any, list[float]] = {}
         self._last_seq_lens: dict[Any, int] = {}
+        self._debug_step = 0
+        self._debug_seen_pruned = False
 
     def apply(
         self,
@@ -55,6 +59,10 @@ class H2OBlockPruner:
         new_block_tables = torch.zeros_like(block_tables)
         new_seq_lens = torch.empty_like(seq_lens)
         changed = False
+        debug_log = bool(getattr(config, "debug_log", False))
+        total_original_blocks = 0
+        total_kept_blocks = 0
+        sample_requests: list[str] = []
 
         for req_index, seq_len in enumerate(seq_lens_list):
             if seq_len <= 0:
@@ -62,6 +70,7 @@ class H2OBlockPruner:
                 continue
 
             valid_blocks = math.ceil(seq_len / block_size)
+            total_original_blocks += valid_blocks
             if seq_len < config.min_seq_len:
                 self._copy_original_row(
                     new_block_tables,
@@ -70,6 +79,19 @@ class H2OBlockPruner:
                     req_index,
                     seq_len,
                 )
+                total_kept_blocks += valid_blocks
+                if debug_log:
+                    self._append_debug_sample(
+                        sample_requests,
+                        config,
+                        request_ids,
+                        req_index,
+                        seq_len,
+                        seq_len,
+                        valid_blocks,
+                        valid_blocks,
+                        "short",
+                    )
                 continue
 
             heavy_blocks, recent_blocks = self._resolve_budgets(seq_len, valid_blocks, block_size, config)
@@ -85,7 +107,20 @@ class H2OBlockPruner:
                     req_index,
                     seq_len,
                 )
+                total_kept_blocks += valid_blocks
                 self._update_scores(req_index, seq_len, valid_blocks, range(valid_blocks), config, request_ids)
+                if debug_log:
+                    self._append_debug_sample(
+                        sample_requests,
+                        config,
+                        request_ids,
+                        req_index,
+                        seq_len,
+                        seq_len,
+                        valid_blocks,
+                        valid_blocks,
+                        "budget>=context",
+                    )
                 continue
 
             selected = self._select_blocks(req_index, seq_len, valid_blocks, heavy_blocks, recent_blocks, request_ids)
@@ -102,12 +137,95 @@ class H2OBlockPruner:
             compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
             new_seq_lens[req_index] = compact_len
             seq_lens_list[req_index] = compact_len
+            total_kept_blocks += len(selected)
             changed = True
             self._update_scores(req_index, seq_len, valid_blocks, selected, config, request_ids)
+            if debug_log:
+                self._append_debug_sample(
+                    sample_requests,
+                    config,
+                    request_ids,
+                    req_index,
+                    seq_len,
+                    compact_len,
+                    valid_blocks,
+                    len(selected),
+                    "pruned",
+                )
 
+        if debug_log:
+            self._log_debug_summary(
+                config,
+                block_size,
+                len(seq_lens_list),
+                total_original_blocks,
+                total_kept_blocks,
+                changed,
+                sample_requests,
+            )
         if not changed:
             return block_tables, seq_lens, [int(x) for x in seq_lens.tolist()]
         return new_block_tables, new_seq_lens, seq_lens_list
+
+    def _log_debug_summary(
+        self,
+        config: Any,
+        block_size: int,
+        batch_size: int,
+        total_original_blocks: int,
+        total_kept_blocks: int,
+        changed: bool,
+        sample_requests: Sequence[str],
+    ) -> None:
+        self._debug_step += 1
+        should_log = self._debug_step == 1 or self._debug_step % config.debug_interval == 0
+        if changed and not self._debug_seen_pruned:
+            should_log = True
+            self._debug_seen_pruned = True
+        if not should_log:
+            return
+
+        pruned_blocks = max(total_original_blocks - total_kept_blocks, 0)
+        keep_ratio = total_kept_blocks / total_original_blocks if total_original_blocks else 1.0
+        rank = os.getenv("RANK", os.getenv("LOCAL_RANK", "unknown"))
+        status = "active" if changed else "enabled_no_prune"
+        logger.info(
+            "[H2O][rank=%s] decode pruning %s: step=%d batch=%d block_size=%d "
+            "original_blocks=%d kept_blocks=%d pruned_blocks=%d keep_ratio=%.4f samples=%s",
+            rank,
+            status,
+            self._debug_step,
+            batch_size,
+            block_size,
+            total_original_blocks,
+            total_kept_blocks,
+            pruned_blocks,
+            keep_ratio,
+            "; ".join(sample_requests) if sample_requests else "[]",
+        )
+
+    def _append_debug_sample(
+        self,
+        sample_requests: list[str],
+        config: Any,
+        request_ids: Sequence[Any] | None,
+        req_index: int,
+        original_len: int,
+        compact_len: int,
+        original_blocks: int,
+        kept_blocks: int,
+        reason: str,
+    ) -> None:
+        debug_sample_requests = getattr(config, "debug_sample_requests", 3)
+        if len(sample_requests) >= debug_sample_requests:
+            return
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is None:
+            request_id = req_index
+        sample_requests.append(
+            f"req={request_id} len={original_len}->{compact_len} "
+            f"blocks={original_blocks}->{kept_blocks} reason={reason}"
+        )
 
     @staticmethod
     def _copy_original_row(

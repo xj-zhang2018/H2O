@@ -15,6 +15,9 @@ class H2OConfigStub:
     max_blocks: int | None = None
     min_seq_len: int = 0
     score_decay: float = 1.0
+    debug_log: bool = False
+    debug_interval: int = 1
+    debug_sample_requests: int = 3
 
 
 def test_h2o_pruner_keeps_heavy_and_recent_blocks():
