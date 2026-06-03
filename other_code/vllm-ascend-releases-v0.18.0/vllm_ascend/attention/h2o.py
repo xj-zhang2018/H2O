@@ -95,9 +95,10 @@ class H2OBlockPruner:
                 continue
 
             heavy_blocks, recent_blocks = self._resolve_budgets(seq_len, valid_blocks, block_size, config)
-            if config.max_blocks is not None:
-                recent_blocks = min(recent_blocks, config.max_blocks)
-                heavy_blocks = min(heavy_blocks, max(config.max_blocks - recent_blocks, 0))
+            block_cap = self._resolve_block_cap(valid_blocks, config)
+            if block_cap is not None:
+                recent_blocks = min(recent_blocks, block_cap)
+                heavy_blocks = min(heavy_blocks, max(block_cap - recent_blocks, 0))
 
             if heavy_blocks + recent_blocks >= valid_blocks:
                 self._copy_original_row(
@@ -268,18 +269,53 @@ class H2OBlockPruner:
             config.recent_blocks,
         )
         if H2OBlockPruner._should_expand_fixed_budget(config):
-            min_keep_blocks = math.ceil(valid_blocks * config.adaptive_min_keep_ratio)
-            if config.max_blocks is not None:
+            min_keep_blocks = heavy_blocks + recent_blocks
+            if config.adaptive_min_keep_ratio > 0:
+                min_keep_blocks = max(
+                    min_keep_blocks,
+                    math.ceil(valid_blocks * config.adaptive_min_keep_ratio),
+                )
+            precision_blocks = H2OBlockPruner._adaptive_precision_blocks(valid_blocks, config)
+            if precision_blocks is not None:
+                min_keep_blocks = max(min_keep_blocks, precision_blocks)
+            elif config.max_blocks is not None and config.adaptive_min_keep_ratio > 0:
                 min_keep_blocks = min(min_keep_blocks, config.max_blocks)
             if min_keep_blocks > heavy_blocks + recent_blocks:
                 heavy_blocks += min_keep_blocks - heavy_blocks - recent_blocks
         return heavy_blocks, recent_blocks
 
     @staticmethod
+    def _resolve_block_cap(valid_blocks: int, config: Any) -> int | None:
+        max_blocks = getattr(config, "max_blocks", None)
+        if max_blocks is None:
+            return None
+        block_cap = min(max_blocks, valid_blocks)
+        precision_blocks = H2OBlockPruner._adaptive_precision_blocks(valid_blocks, config)
+        if precision_blocks is not None:
+            block_cap = max(block_cap, precision_blocks)
+        return min(block_cap, valid_blocks)
+
+    @staticmethod
+    def _adaptive_precision_blocks(valid_blocks: int, config: Any) -> int | None:
+        if not getattr(config, "adaptive_budget", True):
+            return None
+        if getattr(config, "max_blocks", None) is None:
+            return None
+
+        precision_ratio = getattr(config, "adaptive_precision_ratio", 0.0)
+        if precision_ratio <= 0:
+            return None
+
+        precision_blocks = math.ceil(valid_blocks * precision_ratio)
+        precision_max_blocks = getattr(config, "adaptive_precision_max_blocks", None)
+        if precision_max_blocks is not None:
+            precision_blocks = min(precision_blocks, precision_max_blocks)
+        precision_blocks = max(precision_blocks, config.max_blocks)
+        return min(precision_blocks, valid_blocks)
+
+    @staticmethod
     def _should_expand_fixed_budget(config: Any) -> bool:
         if not getattr(config, "adaptive_budget", True):
-            return False
-        if getattr(config, "adaptive_min_keep_ratio", 0.0) <= 0:
             return False
         return config.heavy_blocks is not None or config.recent_blocks is not None
 

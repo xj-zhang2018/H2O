@@ -66,6 +66,8 @@ class TestAscendConfig(TestBase):
                 "heavy_blocks": 2,
                 "recent_blocks": 6,
                 "adaptive_min_keep_ratio": 0.15,
+                "adaptive_precision_ratio": 0.55,
+                "adaptive_precision_max_blocks": 80,
                 "sink_blocks": 2,
                 "anchor_ratio": 0.5,
                 "debug_log": True,
@@ -86,6 +88,8 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.recent_blocks, 6)
         self.assertTrue(ascend_config.h2o_config.adaptive_budget)
         self.assertEqual(ascend_config.h2o_config.adaptive_min_keep_ratio, 0.15)
+        self.assertEqual(ascend_config.h2o_config.adaptive_precision_ratio, 0.55)
+        self.assertEqual(ascend_config.h2o_config.adaptive_precision_max_blocks, 80)
         self.assertEqual(ascend_config.h2o_config.sink_blocks, 2)
         self.assertEqual(ascend_config.h2o_config.anchor_ratio, 0.5)
         self.assertTrue(ascend_config.h2o_config.debug_log)

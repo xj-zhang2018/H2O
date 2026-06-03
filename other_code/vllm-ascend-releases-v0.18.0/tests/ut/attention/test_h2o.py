@@ -17,6 +17,8 @@ class H2OConfigStub:
     score_decay: float = 1.0
     adaptive_budget: bool = True
     adaptive_min_keep_ratio: float = 0.1
+    adaptive_precision_ratio: float = 0.6
+    adaptive_precision_max_blocks: int | None = 96
     sink_blocks: int = 1
     anchor_ratio: float = 0.25
     debug_log: bool = False
@@ -119,9 +121,14 @@ def test_h2o_pruner_expands_small_fixed_budget_for_long_context():
     assert new_lens_list == [10 * 128]
 
 
-def test_h2o_pruner_respects_max_blocks_with_adaptive_budget():
+def test_h2o_pruner_can_keep_max_blocks_strict_when_precision_lift_disabled():
     pruner = H2OBlockPruner()
-    config = H2OConfigStub(heavy_blocks=2, recent_blocks=2, max_blocks=6)
+    config = H2OConfigStub(
+        heavy_blocks=2,
+        recent_blocks=2,
+        max_blocks=6,
+        adaptive_precision_ratio=0.0,
+    )
     block_tables = torch.arange(100, dtype=torch.int32).unsqueeze(0)
     seq_lens = torch.tensor([100 * 128], dtype=torch.int32)
 
@@ -136,3 +143,73 @@ def test_h2o_pruner_respects_max_blocks_with_adaptive_budget():
     assert new_tables[0, :6].tolist() == [0, 17, 49, 81, 98, 99]
     assert new_lens.tolist() == [6 * 128]
     assert new_lens_list == [6 * 128]
+
+
+def test_h2o_pruner_lifts_low_max_blocks_for_medium_long_context():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=16,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+    )
+    block_tables = torch.arange(75, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([75 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :45].tolist() == [
+        0,
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14,
+        16,
+        18,
+        20,
+        22,
+        24,
+        26,
+        28,
+        31,
+        33,
+        35,
+        37,
+        39,
+        41,
+        43,
+        45,
+        47,
+        49,
+        51,
+        53,
+        55,
+        57,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+    ]
+    assert new_lens.tolist() == [45 * 128]
+    assert new_lens_list == [45 * 128]
