@@ -390,6 +390,10 @@ class H2OConfig:
         self.max_blocks = h2o_config.get("max_blocks", None)
         self.min_seq_len = int(h2o_config.get("min_seq_len", 0))
         self.score_decay = float(h2o_config.get("score_decay", 1.0))
+        self.adaptive_budget = bool(h2o_config.get("adaptive_budget", True))
+        self.adaptive_min_keep_ratio = float(h2o_config.get("adaptive_min_keep_ratio", 0.1))
+        self.sink_blocks = h2o_config.get("sink_blocks", 1)
+        self.anchor_ratio = float(h2o_config.get("anchor_ratio", 0.25))
         self.debug_log = bool(h2o_config.get("debug_log", False))
         self.debug_interval = int(h2o_config.get("debug_interval", 1))
         self.debug_sample_requests = int(h2o_config.get("debug_sample_requests", 3))
@@ -401,7 +405,10 @@ class H2OConfig:
                 f"heavy_ratio={self.heavy_ratio}, recent_ratio={self.recent_ratio}, "
                 f"heavy_blocks={self.heavy_blocks}, recent_blocks={self.recent_blocks}, "
                 f"max_blocks={self.max_blocks}, min_seq_len={self.min_seq_len}, "
-                f"score_decay={self.score_decay}, debug_log={self.debug_log}, "
+                f"score_decay={self.score_decay}, adaptive_budget={self.adaptive_budget}, "
+                f"adaptive_min_keep_ratio={self.adaptive_min_keep_ratio}, "
+                f"sink_blocks={self.sink_blocks}, anchor_ratio={self.anchor_ratio}, "
+                f"debug_log={self.debug_log}, "
                 f"debug_interval={self.debug_interval}."
             )
 
@@ -420,12 +427,17 @@ class H2OConfig:
         self._validate_optional_blocks("heavy_blocks", self.heavy_blocks)
         self._validate_optional_blocks("recent_blocks", self.recent_blocks)
         self._validate_optional_blocks("max_blocks", self.max_blocks)
+        self._validate_optional_blocks("sink_blocks", self.sink_blocks)
         if self.max_blocks == 0:
             raise ValueError("h2o_config.max_blocks must be greater than 0 when set")
         if self.min_seq_len < 0:
             raise ValueError("h2o_config.min_seq_len must be non-negative")
         if not 0 < self.score_decay <= 1.0:
             raise ValueError("h2o_config.score_decay must be in the range (0, 1]")
+        if not 0 <= self.adaptive_min_keep_ratio <= 1.0:
+            raise ValueError("h2o_config.adaptive_min_keep_ratio must be in the range [0, 1]")
+        if not 0 <= self.anchor_ratio <= 1.0:
+            raise ValueError("h2o_config.anchor_ratio must be in the range [0, 1]")
         if self.debug_interval <= 0:
             raise ValueError("h2o_config.debug_interval must be greater than 0")
         if self.debug_sample_requests < 0:

@@ -78,6 +78,10 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `max_blocks` | int | `None` | Optional hard cap on selected blocks per request. Recent blocks are kept first. |
 | `min_seq_len` | int | `0` | Minimum sequence length before H2O pruning is applied. |
 | `score_decay` | float | `1.0` | Decay for the lightweight retained-block score proxy. Must be in `(0, 1]`. |
+| `adaptive_budget` | bool | `True` | When fixed block budgets are used, raise very small long-context budgets to `adaptive_min_keep_ratio` unless limited by `max_blocks`. |
+| `adaptive_min_keep_ratio` | float | `0.1` | Minimum selected-block ratio for fixed `heavy_blocks`/`recent_blocks` budgets. Set to `0` to disable the automatic lift. |
+| `sink_blocks` | int | `1` | Number of initial blocks reserved from the heavy budget for system prompts and attention sinks. |
+| `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for evenly spaced historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as anchors. |
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
@@ -91,6 +95,9 @@ Example:
         "heavy_ratio": 0.1,
         "recent_ratio": 0.1,
         "min_seq_len": 2048,
+        "adaptive_min_keep_ratio": 0.1,
+        "sink_blocks": 1,
+        "anchor_ratio": 0.25,
         "debug_log": True,
         "debug_interval": 10
     }

@@ -123,7 +123,15 @@ class H2OBlockPruner:
                     )
                 continue
 
-            selected = self._select_blocks(req_index, seq_len, valid_blocks, heavy_blocks, recent_blocks, request_ids)
+            selected = self._select_blocks(
+                req_index,
+                seq_len,
+                valid_blocks,
+                heavy_blocks,
+                recent_blocks,
+                config,
+                request_ids,
+            )
             if not selected:
                 selected = [valid_blocks - 1]
             elif selected[-1] != valid_blocks - 1:
@@ -259,7 +267,21 @@ class H2OBlockPruner:
             config.recent_ratio,
             config.recent_blocks,
         )
+        if H2OBlockPruner._should_expand_fixed_budget(config):
+            min_keep_blocks = math.ceil(valid_blocks * config.adaptive_min_keep_ratio)
+            if config.max_blocks is not None:
+                min_keep_blocks = min(min_keep_blocks, config.max_blocks)
+            if min_keep_blocks > heavy_blocks + recent_blocks:
+                heavy_blocks += min_keep_blocks - heavy_blocks - recent_blocks
         return heavy_blocks, recent_blocks
+
+    @staticmethod
+    def _should_expand_fixed_budget(config: Any) -> bool:
+        if not getattr(config, "adaptive_budget", True):
+            return False
+        if getattr(config, "adaptive_min_keep_ratio", 0.0) <= 0:
+            return False
+        return config.heavy_blocks is not None or config.recent_blocks is not None
 
     @staticmethod
     def _blocks_from_budget(
@@ -283,6 +305,7 @@ class H2OBlockPruner:
         valid_blocks: int,
         heavy_blocks: int,
         recent_blocks: int,
+        config: Any,
         request_ids: Sequence[Any] | None,
     ) -> list[int]:
         recent_start = max(valid_blocks - recent_blocks, 0)
@@ -291,13 +314,63 @@ class H2OBlockPruner:
         if heavy_blocks <= 0 or heavy_candidate_end <= 0:
             return recent
 
+        sink_blocks = min(getattr(config, "sink_blocks", 1), heavy_blocks, heavy_candidate_end)
+        sink = list(range(sink_blocks))
+        remaining_heavy_blocks = heavy_blocks - len(sink)
+        heavy_candidate_start = sink_blocks
+        if remaining_heavy_blocks <= 0 or heavy_candidate_start >= heavy_candidate_end:
+            return sink + recent
+
         scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
-        if scores is None:
-            heavy = list(range(min(heavy_blocks, heavy_candidate_end)))
+        has_score_signal = scores is not None and any(
+            score > 0 for score in scores[heavy_candidate_start:heavy_candidate_end])
+        if not has_score_signal:
+            heavy = sink + self._evenly_spaced_blocks(
+                heavy_candidate_start,
+                heavy_candidate_end,
+                remaining_heavy_blocks,
+            )
         else:
-            ranked = sorted(range(heavy_candidate_end), key=lambda index: (-scores[index], index))
-            heavy = sorted(ranked[:heavy_blocks])
+            anchor_blocks = min(
+                remaining_heavy_blocks,
+                math.ceil(remaining_heavy_blocks * getattr(config, "anchor_ratio", 0.25)),
+            )
+            anchors = self._evenly_spaced_blocks(heavy_candidate_start, heavy_candidate_end, anchor_blocks)
+            reserved = set(sink) | set(anchors)
+            ranked_candidates = [
+                index for index in range(heavy_candidate_start, heavy_candidate_end) if index not in reserved
+            ]
+            ranked = sorted(ranked_candidates, key=lambda index: (-scores[index], index))
+            score_blocks = remaining_heavy_blocks - len(anchors)
+            heavy = sorted(reserved | set(ranked[:score_blocks]))
         return heavy + recent
+
+    @staticmethod
+    def _evenly_spaced_blocks(start: int, end: int, count: int) -> list[int]:
+        if count <= 0 or start >= end:
+            return []
+        span = end - start
+        if count >= span:
+            return list(range(start, end))
+        if count == 1:
+            return [start + span // 2]
+
+        blocks: list[int] = []
+        seen: set[int] = set()
+        for index in range(count):
+            block = start + min(span - 1, int((index + 0.5) * span / count))
+            if block not in seen:
+                blocks.append(block)
+                seen.add(block)
+        if len(blocks) < count:
+            for block in range(start, end):
+                if block in seen:
+                    continue
+                blocks.append(block)
+                seen.add(block)
+                if len(blocks) == count:
+                    break
+        return sorted(blocks)
 
     def _get_scores(
         self,

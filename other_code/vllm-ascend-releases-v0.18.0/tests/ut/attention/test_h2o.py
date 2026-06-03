@@ -15,6 +15,10 @@ class H2OConfigStub:
     max_blocks: int | None = None
     min_seq_len: int = 0
     score_decay: float = 1.0
+    adaptive_budget: bool = True
+    adaptive_min_keep_ratio: float = 0.1
+    sink_blocks: int = 1
+    anchor_ratio: float = 0.25
     debug_log: bool = False
     debug_interval: int = 1
     debug_sample_requests: int = 3
@@ -94,3 +98,41 @@ def test_h2o_pruner_always_keeps_current_block():
     assert new_tables[0, :2].tolist() == [40, 43]
     assert new_lens.tolist() == [2 * 128]
     assert new_lens_list == [2 * 128]
+
+
+def test_h2o_pruner_expands_small_fixed_budget_for_long_context():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(heavy_blocks=2, recent_blocks=2)
+    block_tables = torch.arange(100, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([100 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :10].tolist() == [0, 7, 21, 35, 49, 63, 77, 91, 98, 99]
+    assert new_lens.tolist() == [10 * 128]
+    assert new_lens_list == [10 * 128]
+
+
+def test_h2o_pruner_respects_max_blocks_with_adaptive_budget():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(heavy_blocks=2, recent_blocks=2, max_blocks=6)
+    block_tables = torch.arange(100, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([100 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :6].tolist() == [0, 17, 49, 81, 98, 99]
+    assert new_lens.tolist() == [6 * 128]
+    assert new_lens_list == [6 * 128]

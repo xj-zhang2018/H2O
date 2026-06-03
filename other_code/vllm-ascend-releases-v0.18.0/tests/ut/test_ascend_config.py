@@ -65,6 +65,9 @@ class TestAscendConfig(TestBase):
                 "enabled": True,
                 "heavy_blocks": 2,
                 "recent_blocks": 6,
+                "adaptive_min_keep_ratio": 0.15,
+                "sink_blocks": 2,
+                "anchor_ratio": 0.5,
                 "debug_log": True,
                 "debug_interval": 16,
             },
@@ -81,6 +84,10 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.h2o_config.enabled)
         self.assertEqual(ascend_config.h2o_config.heavy_blocks, 2)
         self.assertEqual(ascend_config.h2o_config.recent_blocks, 6)
+        self.assertTrue(ascend_config.h2o_config.adaptive_budget)
+        self.assertEqual(ascend_config.h2o_config.adaptive_min_keep_ratio, 0.15)
+        self.assertEqual(ascend_config.h2o_config.sink_blocks, 2)
+        self.assertEqual(ascend_config.h2o_config.anchor_ratio, 0.5)
         self.assertTrue(ascend_config.h2o_config.debug_log)
         self.assertEqual(ascend_config.h2o_config.debug_interval, 16)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
