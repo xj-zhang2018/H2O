@@ -86,6 +86,9 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
 | `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |
 | `score_coverage_ratio` | float | `0.35` | Fraction of the remaining heavy budget reserved for stable evenly spaced historical coverage when score signal exists. This keeps middle and late context represented while retaining the same selected-block count. |
+| `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper. Set to `0` to disable tapering. The target is never lower than `max_blocks` when `max_blocks` is set. |
+| `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
+| `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
@@ -100,12 +103,15 @@ Example:
         "recent_ratio": 0.1,
         "min_seq_len": 2048,
         "adaptive_min_keep_ratio": 0.1,
-        "adaptive_precision_ratio": 0.45,
-        "adaptive_precision_max_blocks": 72,
+        "adaptive_precision_ratio": 0.65,
+        "adaptive_precision_max_blocks": 96,
         "sink_blocks": 1,
-        "anchor_ratio": 0.5,
+        "anchor_ratio": 0.35,
         "score_explore_ratio": 0.2,
         "score_coverage_ratio": 0.35,
+        "decode_budget_fast_ratio": 0.45,
+        "decode_budget_taper_steps": 256,
+        "decode_budget_taper_start_step": 64,
         "debug_log": False,
         "debug_interval": 50
     }

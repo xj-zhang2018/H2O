@@ -100,6 +100,14 @@ class H2OBlockPruner:
             if block_cap is not None:
                 recent_blocks = min(recent_blocks, block_cap)
                 heavy_blocks = min(heavy_blocks, max(block_cap - recent_blocks, 0))
+            heavy_blocks, recent_blocks = self._apply_decode_budget_taper(
+                req_index,
+                valid_blocks,
+                heavy_blocks,
+                recent_blocks,
+                config,
+                request_ids,
+            )
 
             if heavy_blocks + recent_blocks >= valid_blocks:
                 self._copy_original_row(
@@ -334,6 +342,49 @@ class H2OBlockPruner:
             return 0
         token_budget = max(1, int(seq_len * ratio))
         return min(math.ceil(token_budget / block_size), valid_blocks)
+
+    def _apply_decode_budget_taper(
+        self,
+        req_index: int,
+        valid_blocks: int,
+        heavy_blocks: int,
+        recent_blocks: int,
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> tuple[int, int]:
+        fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
+        taper_steps = getattr(config, "decode_budget_taper_steps", 0)
+        if fast_ratio <= 0 or taper_steps <= 0:
+            return heavy_blocks, recent_blocks
+
+        current_total = heavy_blocks + recent_blocks
+        if current_total <= 0:
+            return heavy_blocks, recent_blocks
+
+        start_step = getattr(config, "decode_budget_taper_start_step", 0)
+        decode_step = max(self._get_decode_step(req_index, request_ids) - start_step, 0)
+        if decode_step <= 0:
+            return heavy_blocks, recent_blocks
+
+        fast_target = math.ceil(valid_blocks * fast_ratio)
+        max_blocks = getattr(config, "max_blocks", None)
+        if max_blocks is not None:
+            fast_target = max(fast_target, min(max_blocks, valid_blocks))
+
+        min_heavy_blocks = min(heavy_blocks, getattr(config, "sink_blocks", 1))
+        min_total = min(valid_blocks, recent_blocks + min_heavy_blocks)
+        fast_target = min(max(fast_target, min_total), current_total, valid_blocks)
+        if fast_target >= current_total:
+            return heavy_blocks, recent_blocks
+
+        progress = min(decode_step / taper_steps, 1.0)
+        tapered_total = math.ceil(current_total - (current_total - fast_target) * progress)
+        tapered_total = min(max(tapered_total, min_total), current_total)
+        if tapered_total >= current_total:
+            return heavy_blocks, recent_blocks
+
+        tapered_heavy_blocks = max(tapered_total - recent_blocks, min_heavy_blocks)
+        return tapered_heavy_blocks, recent_blocks
 
     def _select_blocks(
         self,

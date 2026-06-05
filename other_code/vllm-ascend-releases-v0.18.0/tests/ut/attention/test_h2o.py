@@ -23,6 +23,9 @@ class H2OConfigStub:
     anchor_ratio: float = 0.25
     score_explore_ratio: float = 0.2
     score_coverage_ratio: float = 0.35
+    decode_budget_fast_ratio: float = 0.45
+    decode_budget_taper_steps: int = 256
+    decode_budget_taper_start_step: int = 64
     debug_log: bool = False
     debug_interval: int = 1
     debug_sample_requests: int = 3
@@ -313,3 +316,33 @@ def test_h2o_pruner_keeps_coverage_blocks_with_score_signal():
     assert new_tables[0, :9].tolist() == [0, 1, 2, 4, 6, 9, 11, 13, 15]
     assert new_lens.tolist() == [9 * 128]
     assert new_lens_list == [9 * 128]
+
+
+def test_h2o_pruner_tapers_decode_budget_for_later_steps():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=16,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.65,
+        adaptive_precision_max_blocks=96,
+        decode_budget_fast_ratio=0.45,
+        decode_budget_taper_steps=128,
+        decode_budget_taper_start_step=0,
+    )
+    pruner._decode_steps["req-0"] = 128
+    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :36].tolist()[-16:] == list(range(64, 80))
+    assert new_lens.tolist() == [36 * 128]
+    assert new_lens_list == [36 * 128]
