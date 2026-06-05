@@ -70,6 +70,7 @@ class TestAscendConfig(TestBase):
                 "adaptive_precision_max_blocks": 80,
                 "sink_blocks": 2,
                 "anchor_ratio": 0.5,
+                "score_explore_ratio": 0.3,
                 "debug_log": True,
                 "debug_interval": 16,
             },
@@ -92,6 +93,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.adaptive_precision_max_blocks, 80)
         self.assertEqual(ascend_config.h2o_config.sink_blocks, 2)
         self.assertEqual(ascend_config.h2o_config.anchor_ratio, 0.5)
+        self.assertEqual(ascend_config.h2o_config.score_explore_ratio, 0.3)
         self.assertTrue(ascend_config.h2o_config.debug_log)
         self.assertEqual(ascend_config.h2o_config.debug_interval, 16)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)

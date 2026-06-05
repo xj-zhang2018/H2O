@@ -84,6 +84,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. Set to `None` to allow the ratio-based lift without an extra block cap. |
 | `sink_blocks` | int | `1` | Number of initial blocks reserved from the heavy budget for system prompts and attention sinks. |
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
+| `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
@@ -102,6 +103,7 @@ Example:
         "adaptive_precision_max_blocks": 72,
         "sink_blocks": 1,
         "anchor_ratio": 0.5,
+        "score_explore_ratio": 0.2,
         "debug_log": False,
         "debug_interval": 50
     }

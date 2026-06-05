@@ -36,6 +36,7 @@ class H2OBlockPruner:
     def __init__(self):
         self._scores: dict[Any, list[float]] = {}
         self._last_seq_lens: dict[Any, int] = {}
+        self._decode_steps: dict[Any, int] = {}
         self._debug_step = 0
         self._debug_seen_pruned = False
 
@@ -378,11 +379,26 @@ class H2OBlockPruner:
                 scores,
             )
             reserved = set(sink) | set(anchors)
+            explore_ratio = getattr(config, "score_explore_ratio", 0.0)
+            explore_blocks = 0
+            if explore_ratio > 0:
+                explore_blocks = min(
+                    max(remaining_heavy_blocks - len(anchors), 0),
+                    math.ceil(remaining_heavy_blocks * explore_ratio),
+                )
+            exploration = self._rotating_evenly_spaced_blocks(
+                heavy_candidate_start,
+                heavy_candidate_end,
+                explore_blocks,
+                self._get_decode_step(req_index, request_ids),
+                reserved,
+            )
+            reserved.update(exploration)
             ranked_candidates = [
                 index for index in range(heavy_candidate_start, heavy_candidate_end) if index not in reserved
             ]
             ranked = sorted(ranked_candidates, key=lambda index: (-scores[index], index))
-            score_blocks = remaining_heavy_blocks - len(anchors)
+            score_blocks = max(heavy_blocks - len(reserved), 0)
             heavy = sorted(reserved | set(ranked[:score_blocks]))
         return heavy + recent
 
@@ -447,6 +463,54 @@ class H2OBlockPruner:
                     break
         return sorted(blocks)
 
+    @staticmethod
+    def _rotating_evenly_spaced_blocks(
+        start: int,
+        end: int,
+        count: int,
+        phase: int,
+        excluded: set[int],
+    ) -> list[int]:
+        if count <= 0 or start >= end:
+            return []
+        span = end - start
+        if count >= span:
+            return [block for block in range(start, end) if block not in excluded][:count]
+
+        blocks: list[int] = []
+        seen = set(excluded)
+        for bucket in range(count):
+            bucket_start = start + bucket * span // count
+            bucket_end = start + (bucket + 1) * span // count
+            if bucket_end <= bucket_start:
+                bucket_end = bucket_start + 1
+            bucket_end = min(bucket_end, end)
+            bucket_span = bucket_end - bucket_start
+            for attempt in range(bucket_span):
+                block = bucket_start + (phase + attempt) % bucket_span
+                if block in seen:
+                    continue
+                blocks.append(block)
+                seen.add(block)
+                break
+
+        if len(blocks) < count:
+            for block in H2OBlockPruner._evenly_spaced_blocks(start, end, count):
+                if block in seen:
+                    continue
+                blocks.append(block)
+                seen.add(block)
+                if len(blocks) == count:
+                    break
+        if len(blocks) < count:
+            for block in range(start, end):
+                if block in seen:
+                    continue
+                blocks.append(block)
+                if len(blocks) == count:
+                    break
+        return sorted(blocks)
+
     def _get_scores(
         self,
         req_index: int,
@@ -461,6 +525,7 @@ class H2OBlockPruner:
         last_seq_len = self._last_seq_lens.get(request_id)
         if last_seq_len is not None and seq_len < last_seq_len:
             self._scores.pop(request_id, None)
+            self._decode_steps.pop(request_id, None)
 
         scores = self._scores.setdefault(request_id, [])
         if len(scores) < valid_blocks:
@@ -487,6 +552,15 @@ class H2OBlockPruner:
                 scores[index] = score * config.score_decay
         for index in selected:
             scores[index] += 1.0
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is not None:
+            self._decode_steps[request_id] = self._decode_steps.get(request_id, 0) + 1
+
+    def _get_decode_step(self, req_index: int, request_ids: Sequence[Any] | None) -> int:
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is None:
+            return 0
+        return self._decode_steps.get(request_id, 0)
 
     @staticmethod
     def _get_request_id(req_index: int, request_ids: Sequence[Any] | None) -> Any | None:
