@@ -213,3 +213,31 @@ def test_h2o_pruner_lifts_low_max_blocks_for_medium_long_context():
     ]
     assert new_lens.tolist() == [45 * 128]
     assert new_lens_list == [45 * 128]
+
+
+def test_h2o_pruner_uses_scores_for_historical_anchors():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=5,
+        recent_blocks=2,
+        adaptive_budget=False,
+        anchor_ratio=1.0,
+    )
+    pruner._scores["req-0"] = [0.0] * 20
+    for block in (4, 8, 12, 16):
+        pruner._scores["req-0"][block] = 10.0
+
+    block_tables = torch.arange(20, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([20 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :7].tolist() == [0, 4, 8, 12, 16, 18, 19]
+    assert new_lens.tolist() == [7 * 128]
+    assert new_lens_list == [7 * 128]

@@ -371,7 +371,12 @@ class H2OBlockPruner:
                 remaining_heavy_blocks,
                 math.ceil(remaining_heavy_blocks * getattr(config, "anchor_ratio", 0.25)),
             )
-            anchors = self._evenly_spaced_blocks(heavy_candidate_start, heavy_candidate_end, anchor_blocks)
+            anchors = self._score_guided_anchor_blocks(
+                heavy_candidate_start,
+                heavy_candidate_end,
+                anchor_blocks,
+                scores,
+            )
             reserved = set(sink) | set(anchors)
             ranked_candidates = [
                 index for index in range(heavy_candidate_start, heavy_candidate_end) if index not in reserved
@@ -380,6 +385,40 @@ class H2OBlockPruner:
             score_blocks = remaining_heavy_blocks - len(anchors)
             heavy = sorted(reserved | set(ranked[:score_blocks]))
         return heavy + recent
+
+    @staticmethod
+    def _score_guided_anchor_blocks(start: int, end: int, count: int, scores: Sequence[float]) -> list[int]:
+        if count <= 0 or start >= end:
+            return []
+        span = end - start
+        if count >= span:
+            return list(range(start, end))
+
+        anchors: list[int] = []
+        seen: set[int] = set()
+        for bucket in range(count):
+            bucket_start = start + bucket * span // count
+            bucket_end = start + (bucket + 1) * span // count
+            if bucket_end <= bucket_start:
+                bucket_end = bucket_start + 1
+            bucket_end = min(bucket_end, end)
+            center = bucket_start + (bucket_end - bucket_start) // 2
+            best = max(
+                range(bucket_start, bucket_end),
+                key=lambda index: (scores[index], -abs(index - center), -index),
+            )
+            anchors.append(best)
+            seen.add(best)
+
+        if len(anchors) < count:
+            for block in H2OBlockPruner._evenly_spaced_blocks(start, end, count):
+                if block in seen:
+                    continue
+                anchors.append(block)
+                seen.add(block)
+                if len(anchors) == count:
+                    break
+        return sorted(anchors)
 
     @staticmethod
     def _evenly_spaced_blocks(start: int, end: int, count: int) -> list[int]:
