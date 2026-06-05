@@ -394,6 +394,20 @@ class H2OBlockPruner:
                 reserved,
             )
             reserved.update(exploration)
+            coverage_ratio = getattr(config, "score_coverage_ratio", 0.0)
+            coverage_blocks = 0
+            if coverage_ratio > 0:
+                coverage_blocks = min(
+                    max(heavy_blocks - len(reserved), 0),
+                    math.ceil(remaining_heavy_blocks * coverage_ratio),
+                )
+            coverage = self._coverage_blocks(
+                heavy_candidate_start,
+                heavy_candidate_end,
+                coverage_blocks,
+                reserved,
+            )
+            reserved.update(coverage)
             ranked_candidates = [
                 index for index in range(heavy_candidate_start, heavy_candidate_end) if index not in reserved
             ]
@@ -461,6 +475,30 @@ class H2OBlockPruner:
                 seen.add(block)
                 if len(blocks) == count:
                     break
+        return sorted(blocks)
+
+    @staticmethod
+    def _coverage_blocks(start: int, end: int, count: int, excluded: set[int]) -> list[int]:
+        if count <= 0 or start >= end:
+            return []
+
+        blocks: list[int] = []
+        seen = set(excluded)
+
+        def append_candidates(candidates: Sequence[int]) -> None:
+            for block in candidates:
+                if block in seen:
+                    continue
+                blocks.append(block)
+                seen.add(block)
+                if len(blocks) == count:
+                    break
+
+        append_candidates(H2OBlockPruner._evenly_spaced_blocks(start, end, count))
+        if len(blocks) < count:
+            append_candidates(H2OBlockPruner._evenly_spaced_blocks(start, end, min(end - start, count * 2)))
+        if len(blocks) < count:
+            append_candidates(range(start, end))
         return sorted(blocks)
 
     @staticmethod

@@ -397,6 +397,7 @@ class H2OConfig:
         self.sink_blocks = h2o_config.get("sink_blocks", 1)
         self.anchor_ratio = float(h2o_config.get("anchor_ratio", 0.25))
         self.score_explore_ratio = float(h2o_config.get("score_explore_ratio", 0.2))
+        self.score_coverage_ratio = float(h2o_config.get("score_coverage_ratio", 0.35))
         self.debug_log = bool(h2o_config.get("debug_log", False))
         self.debug_interval = int(h2o_config.get("debug_interval", 1))
         self.debug_sample_requests = int(h2o_config.get("debug_sample_requests", 3))
@@ -414,6 +415,7 @@ class H2OConfig:
                 f"adaptive_precision_max_blocks={self.adaptive_precision_max_blocks}, "
                 f"sink_blocks={self.sink_blocks}, anchor_ratio={self.anchor_ratio}, "
                 f"score_explore_ratio={self.score_explore_ratio}, "
+                f"score_coverage_ratio={self.score_coverage_ratio}, "
                 f"debug_log={self.debug_log}, "
                 f"debug_interval={self.debug_interval}."
             )
@@ -451,6 +453,8 @@ class H2OConfig:
             raise ValueError("h2o_config.anchor_ratio must be in the range [0, 1]")
         if not 0 <= self.score_explore_ratio <= 1.0:
             raise ValueError("h2o_config.score_explore_ratio must be in the range [0, 1]")
+        if not 0 <= self.score_coverage_ratio <= 1.0:
+            raise ValueError("h2o_config.score_coverage_ratio must be in the range [0, 1]")
         if self.debug_interval <= 0:
             raise ValueError("h2o_config.debug_interval must be greater than 0")
         if self.debug_sample_requests < 0:

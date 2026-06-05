@@ -85,6 +85,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `sink_blocks` | int | `1` | Number of initial blocks reserved from the heavy budget for system prompts and attention sinks. |
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
 | `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |
+| `score_coverage_ratio` | float | `0.35` | Fraction of the remaining heavy budget reserved for stable evenly spaced historical coverage when score signal exists. This keeps middle and late context represented while retaining the same selected-block count. |
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
@@ -104,6 +105,7 @@ Example:
         "sink_blocks": 1,
         "anchor_ratio": 0.5,
         "score_explore_ratio": 0.2,
+        "score_coverage_ratio": 0.35,
         "debug_log": False,
         "debug_interval": 50
     }

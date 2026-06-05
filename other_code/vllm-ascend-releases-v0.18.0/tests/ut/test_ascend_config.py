@@ -71,6 +71,7 @@ class TestAscendConfig(TestBase):
                 "sink_blocks": 2,
                 "anchor_ratio": 0.5,
                 "score_explore_ratio": 0.3,
+                "score_coverage_ratio": 0.4,
                 "debug_log": True,
                 "debug_interval": 16,
             },
@@ -94,6 +95,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.sink_blocks, 2)
         self.assertEqual(ascend_config.h2o_config.anchor_ratio, 0.5)
         self.assertEqual(ascend_config.h2o_config.score_explore_ratio, 0.3)
+        self.assertEqual(ascend_config.h2o_config.score_coverage_ratio, 0.4)
         self.assertTrue(ascend_config.h2o_config.debug_log)
         self.assertEqual(ascend_config.h2o_config.debug_interval, 16)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
