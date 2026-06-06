@@ -167,6 +167,8 @@ def test_h2o_pruner_skips_compaction_when_prune_ratio_is_too_small():
     assert new_lens is seq_lens
     assert new_lens_list == [5 * 128]
     assert pruner._decode_steps["req-0"] == 1
+    assert "req-0" not in pruner._scores
+    assert "req-0" not in pruner._selection_cache
 
 
 def test_h2o_pruner_clusters_cold_start_history_blocks():
@@ -629,6 +631,76 @@ def test_h2o_pruner_prunes_first_decode_when_warmup_disabled():
     assert new_tables[0, :64].tolist()[-16:] == list(range(64, 80))
     assert new_lens.tolist() == [64 * 128]
     assert new_lens_list == [64 * 128]
+
+
+def test_h2o_pruner_skips_low_savings_taper_before_selection():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=48,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.8,
+        adaptive_precision_max_blocks=64,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.0,
+        decode_budget_taper_steps=64,
+        decode_budget_taper_start_step=0,
+        min_prune_ratio=0.30,
+        selection_refresh_interval=16,
+    )
+    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables is block_tables
+    assert new_lens is seq_lens
+    assert new_lens_list == [80 * 128]
+    assert pruner._decode_steps["req-0"] == 1
+    assert "req-0" not in pruner._scores
+    assert "req-0" not in pruner._selection_cache
+
+
+def test_h2o_pruner_prunes_once_taper_has_enough_savings():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=48,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.8,
+        adaptive_precision_max_blocks=64,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.0,
+        decode_budget_taper_steps=64,
+        decode_budget_taper_start_step=0,
+        min_prune_ratio=0.30,
+        selection_refresh_interval=16,
+    )
+    pruner._decode_steps["req-0"] = 64
+    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables.shape == (1, 64)
+    assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
+    assert new_tables[0, 32:].tolist() == [0] * 32
+    assert new_lens.tolist() == [32 * 128]
+    assert new_lens_list == [32 * 128]
 
 
 def test_h2o_pruner_reuses_compact_metadata_indices_for_cached_selection():

@@ -80,9 +80,11 @@ class H2OBlockPruner:
         debug_log = bool(getattr(config, "debug_log", False))
         total_original_blocks = 0
         total_kept_blocks = 0
+        planned_kept_blocks = 0
         sample_requests: list[str] = []
-        selected_block_rows: list[Sequence[int]] = []
+        selected_block_rows: list[Sequence[int] | None] = []
         score_updates: list[tuple[int, int, int, Sequence[int] | None, bool]] = []
+        prune_candidates: list[tuple[int, int, int, int, int, int]] = []
 
         for req_index, seq_len in enumerate(resolved_seq_lens):
             if seq_len <= 0:
@@ -94,6 +96,7 @@ class H2OBlockPruner:
             if seq_len < config.min_seq_len:
                 selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
+                planned_kept_blocks += valid_blocks
                 if debug_log:
                     self._append_debug_sample(
                         sample_requests,
@@ -110,6 +113,7 @@ class H2OBlockPruner:
             if self._should_keep_full_decode_step(req_index, config, request_ids):
                 selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
+                planned_kept_blocks += valid_blocks
                 score_updates.append((req_index, seq_len, valid_blocks, None, True))
                 if debug_log:
                     self._append_debug_sample(
@@ -127,6 +131,7 @@ class H2OBlockPruner:
             if self._should_keep_full_context(valid_blocks, config):
                 selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
+                planned_kept_blocks += valid_blocks
                 if debug_log:
                     self._append_debug_sample(
                         sample_requests,
@@ -158,6 +163,7 @@ class H2OBlockPruner:
             if heavy_blocks + recent_blocks >= valid_blocks:
                 selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
+                planned_kept_blocks += valid_blocks
                 score_updates.append((req_index, seq_len, valid_blocks, range(valid_blocks), False))
                 if debug_log:
                     self._append_debug_sample(
@@ -173,6 +179,56 @@ class H2OBlockPruner:
                     )
                 continue
 
+            selected_block_rows.append(None)
+            planned_kept_blocks += min(valid_blocks, max(heavy_blocks + recent_blocks, 1))
+            prune_candidates.append((
+                len(selected_block_rows) - 1,
+                req_index,
+                seq_len,
+                valid_blocks,
+                heavy_blocks,
+                recent_blocks,
+            ))
+            changed = True
+
+        if not changed:
+            if debug_log:
+                self._log_debug_summary(
+                    config,
+                    block_size,
+                    len(resolved_seq_lens),
+                    total_original_blocks,
+                    total_kept_blocks,
+                    changed,
+                    sample_requests,
+                )
+            return block_tables, seq_lens, resolved_seq_lens
+        if not self._has_enough_pruning_savings(total_original_blocks, planned_kept_blocks, config):
+            skip_updates = list(score_updates)
+            skip_updates.extend(
+                (req_index, seq_len, valid_blocks, None, True)
+                for _, req_index, seq_len, valid_blocks, _, _ in prune_candidates
+            )
+            self._touch_decode_steps_for_skipped_pruning(skip_updates, request_ids)
+            if debug_log:
+                logger.info(
+                    "[H2O] skipped compact metadata before block selection because planned prune ratio %.4f "
+                    "is below min_prune_ratio %.4f",
+                    self._prune_ratio(total_original_blocks, planned_kept_blocks),
+                    getattr(config, "min_prune_ratio", 0.0),
+                )
+                self._log_debug_summary(
+                    config,
+                    block_size,
+                    len(resolved_seq_lens),
+                    total_original_blocks,
+                    planned_kept_blocks,
+                    False,
+                    sample_requests,
+                )
+            return block_tables, seq_lens, original_seq_lens
+
+        for row_pos, req_index, seq_len, valid_blocks, heavy_blocks, recent_blocks in prune_candidates:
             selected, cache_hit = self._select_blocks(
                 req_index,
                 seq_len,
@@ -183,10 +239,9 @@ class H2OBlockPruner:
                 request_ids,
             )
             compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
-            selected_block_rows.append(selected)
+            selected_block_rows[row_pos] = selected
             resolved_seq_lens[req_index] = compact_len
             total_kept_blocks += len(selected)
-            changed = True
             score_updates.append((req_index, seq_len, valid_blocks, selected, cache_hit))
             if debug_log:
                 self._append_debug_sample(
@@ -211,20 +266,10 @@ class H2OBlockPruner:
                 changed,
                 sample_requests,
             )
-        if not changed:
-            return block_tables, seq_lens, resolved_seq_lens
-        if not self._has_enough_pruning_savings(total_original_blocks, total_kept_blocks, config):
-            self._touch_decode_steps_for_skipped_pruning(score_updates, request_ids)
-            if debug_log:
-                logger.info(
-                    "[H2O] skipped compact metadata because prune ratio %.4f is below min_prune_ratio %.4f",
-                    self._prune_ratio(total_original_blocks, total_kept_blocks),
-                    getattr(config, "min_prune_ratio", 0.0),
-                )
-            return block_tables, seq_lens, original_seq_lens
 
         self._apply_score_updates(score_updates, config, request_ids)
-        return self._build_compact_metadata(block_tables, seq_lens, selected_block_rows, resolved_seq_lens, config)
+        compact_rows = [row if row is not None else (0,) for row in selected_block_rows]
+        return self._build_compact_metadata(block_tables, seq_lens, compact_rows, resolved_seq_lens, config)
 
     def _can_keep_original_metadata(
         self,
