@@ -368,6 +368,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             block_size=block_size,
             config=h2o_config,
             request_ids=common_attn_metadata.request_ids,
+            seq_lens_list=attn_metadata.seq_lens_list,
         )
         attn_metadata.block_tables = block_tables
         attn_metadata.seq_lens = seq_lens

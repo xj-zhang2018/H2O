@@ -86,10 +86,12 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
 | `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |
 | `score_coverage_ratio` | float | `0.35` | Fraction of the remaining heavy budget reserved for stable evenly spaced historical coverage when score signal exists. This keeps middle and late context represented while retaining the same selected-block count. |
+| `decode_full_attention_steps` | int | `0` | Number of initial decode metadata builds per request that keep the original full context before H2O pruning starts. This can reduce TTFT impact and protect early-token quality for long prompts. |
 | `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper. Set to `0` to disable tapering. When `max_blocks` is set, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
 | `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
 | `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
 | `selection_refresh_interval` | int | `4` | Number of decode steps between score-guided historical block reselections when the selected-block budget is stable. Set to `1` to recompute every step. Budget or context-length changes still refresh immediately. |
+| `score_update_on_cache_hit` | bool | `False` | Whether to update retained-block scores when `selection_refresh_interval` reuses a cached selection. The default avoids duplicate Python-side score work and reduces score lock-in during cached decode steps. |
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
@@ -110,14 +112,30 @@ Example:
         "anchor_ratio": 0.35,
         "score_explore_ratio": 0.2,
         "score_coverage_ratio": 0.35,
+        "decode_full_attention_steps": 8,
         "decode_budget_fast_ratio": 0.45,
         "decode_budget_taper_steps": 256,
         "decode_budget_taper_start_step": 64,
         "selection_refresh_interval": 4,
+        "score_update_on_cache_hit": False,
         "debug_log": False,
         "debug_interval": 50
     }
 }
+```
+
+For 10k input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+VLLM_USE_V1=1 \
+vllm serve /path/to/model \
+  --served-model-name h2o-model \
+  --tensor-parallel-size 8 \
+  --max-model-len 12288 \
+  --max-num-seqs 32 \
+  --block-size 128 \
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":40,"recent_blocks":24,"max_blocks":64,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.82,"adaptive_precision_max_blocks":null,"sink_blocks":1,"anchor_ratio":0.35,"score_explore_ratio":0.2,"score_coverage_ratio":0.35,"decode_full_attention_steps":8,"decode_budget_fast_ratio":0.78,"decode_budget_taper_steps":128,"decode_budget_taper_start_step":64,"selection_refresh_interval":8,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

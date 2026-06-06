@@ -49,20 +49,30 @@ class H2OBlockPruner:
         block_size: int,
         config: Any,
         request_ids: Sequence[Any] | None = None,
+        seq_lens_list: Sequence[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-        if block_tables is None or seq_lens is None:
-            seq_lens_list = [] if seq_lens is None else [int(x) for x in seq_lens.tolist()]
-            return block_tables, seq_lens, seq_lens_list
+        if seq_lens_list is None:
+            resolved_seq_lens = [] if seq_lens is None else [int(x) for x in seq_lens.tolist()]
+        else:
+            resolved_seq_lens = [int(x) for x in seq_lens_list]
 
-        seq_lens_list = [int(x) for x in seq_lens.tolist()]
+        if block_tables is None or seq_lens is None:
+            return block_tables, seq_lens, resolved_seq_lens
+
         if block_size <= 0:
-            return block_tables, seq_lens, seq_lens_list
+            return block_tables, seq_lens, resolved_seq_lens
 
         valid_block_counts = [
-            math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in seq_lens_list
+            math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in resolved_seq_lens
         ]
-        if self._can_keep_original_metadata(seq_lens_list, valid_block_counts, config):
-            return block_tables, seq_lens, seq_lens_list
+        if self._can_keep_original_metadata(
+            resolved_seq_lens,
+            valid_block_counts,
+            config,
+            request_ids,
+        ):
+            self._advance_warmup_decode_steps(resolved_seq_lens, valid_block_counts, config, request_ids)
+            return block_tables, seq_lens, resolved_seq_lens
 
         new_block_tables = torch.empty_like(block_tables)
         new_seq_lens = torch.empty_like(seq_lens)
@@ -72,8 +82,9 @@ class H2OBlockPruner:
         total_kept_blocks = 0
         sample_requests: list[str] = []
 
-        for req_index, seq_len in enumerate(seq_lens_list):
+        for req_index, seq_len in enumerate(resolved_seq_lens):
             if seq_len <= 0:
+                new_block_tables[req_index] = block_tables[req_index]
                 new_seq_lens[req_index] = 0
                 continue
 
@@ -99,6 +110,29 @@ class H2OBlockPruner:
                         valid_blocks,
                         valid_blocks,
                         "short",
+                    )
+                continue
+            if self._should_keep_full_decode_step(req_index, config, request_ids):
+                self._copy_original_row(
+                    new_block_tables,
+                    block_tables,
+                    new_seq_lens,
+                    req_index,
+                    seq_len,
+                )
+                total_kept_blocks += valid_blocks
+                self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+                if debug_log:
+                    self._append_debug_sample(
+                        sample_requests,
+                        config,
+                        request_ids,
+                        req_index,
+                        seq_len,
+                        seq_len,
+                        valid_blocks,
+                        valid_blocks,
+                        "decode-warmup",
                     )
                 continue
             if self._should_keep_full_context(valid_blocks, config):
@@ -162,7 +196,7 @@ class H2OBlockPruner:
                     )
                 continue
 
-            selected = self._select_blocks(
+            selected, cache_hit = self._select_blocks(
                 req_index,
                 seq_len,
                 valid_blocks,
@@ -183,10 +217,13 @@ class H2OBlockPruner:
 
             compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
             new_seq_lens[req_index] = compact_len
-            seq_lens_list[req_index] = compact_len
+            resolved_seq_lens[req_index] = compact_len
             total_kept_blocks += len(selected)
             changed = True
-            self._update_scores(req_index, seq_len, valid_blocks, selected, config, request_ids)
+            if cache_hit and not getattr(config, "score_update_on_cache_hit", False):
+                self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+            else:
+                self._update_scores(req_index, seq_len, valid_blocks, selected, config, request_ids)
             if debug_log:
                 self._append_debug_sample(
                     sample_requests,
@@ -204,33 +241,51 @@ class H2OBlockPruner:
             self._log_debug_summary(
                 config,
                 block_size,
-                len(seq_lens_list),
+                len(resolved_seq_lens),
                 total_original_blocks,
                 total_kept_blocks,
                 changed,
                 sample_requests,
             )
         if not changed:
-            return block_tables, seq_lens, [int(x) for x in seq_lens.tolist()]
-        return new_block_tables, new_seq_lens, seq_lens_list
+            return block_tables, seq_lens, resolved_seq_lens
+        return new_block_tables, new_seq_lens, resolved_seq_lens
 
-    @staticmethod
     def _can_keep_original_metadata(
+        self,
         seq_lens: Sequence[int],
         valid_block_counts: Sequence[int],
         config: Any,
+        request_ids: Sequence[Any] | None,
     ) -> bool:
         if not seq_lens:
             return True
-        for seq_len, valid_blocks in zip(seq_lens, valid_block_counts):
+        for req_index, (seq_len, valid_blocks) in enumerate(zip(seq_lens, valid_block_counts)):
             if seq_len <= 0:
                 continue
             if seq_len < config.min_seq_len:
                 continue
             if H2OBlockPruner._should_keep_full_context(valid_blocks, config):
                 continue
+            if self._should_keep_full_decode_step(req_index, config, request_ids):
+                continue
             return False
         return True
+
+    def _advance_warmup_decode_steps(
+        self,
+        seq_lens: Sequence[int],
+        valid_block_counts: Sequence[int],
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> None:
+        for req_index, (seq_len, valid_blocks) in enumerate(zip(seq_lens, valid_block_counts)):
+            if seq_len <= 0 or seq_len < config.min_seq_len:
+                continue
+            if self._should_keep_full_context(valid_blocks, config):
+                continue
+            if self._should_keep_full_decode_step(req_index, config, request_ids):
+                self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
 
     def _log_debug_summary(
         self,
@@ -451,6 +506,19 @@ class H2OBlockPruner:
         tapered_heavy_blocks = max(tapered_total - recent_blocks, min_heavy_blocks)
         return tapered_heavy_blocks, recent_blocks
 
+    def _should_keep_full_decode_step(
+        self,
+        req_index: int,
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> bool:
+        warmup_steps = getattr(config, "decode_full_attention_steps", 0)
+        if warmup_steps <= 0:
+            return False
+        if self._get_request_id(req_index, request_ids) is None:
+            return False
+        return self._get_decode_step(req_index, request_ids) < warmup_steps
+
     def _select_blocks(
         self,
         req_index: int,
@@ -460,7 +528,7 @@ class H2OBlockPruner:
         recent_blocks: int,
         config: Any,
         request_ids: Sequence[Any] | None,
-    ) -> list[int]:
+    ) -> tuple[list[int], bool]:
         cache_key = self._selection_cache_key(
             req_index,
             valid_blocks,
@@ -471,20 +539,20 @@ class H2OBlockPruner:
         )
         cached = self._get_cached_selection(req_index, cache_key, config, request_ids)
         if cached is not None:
-            return cached
+            return cached, True
 
         recent_start = max(valid_blocks - recent_blocks, 0)
         recent = list(range(recent_start, valid_blocks))
         heavy_candidate_end = recent_start
         if heavy_blocks <= 0 or heavy_candidate_end <= 0:
-            return self._cache_selection(req_index, cache_key, recent, request_ids)
+            return self._cache_selection(req_index, cache_key, recent, request_ids), False
 
         sink_blocks = min(getattr(config, "sink_blocks", 1), heavy_blocks, heavy_candidate_end)
         sink = list(range(sink_blocks))
         remaining_heavy_blocks = heavy_blocks - len(sink)
         heavy_candidate_start = sink_blocks
         if remaining_heavy_blocks <= 0 or heavy_candidate_start >= heavy_candidate_end:
-            return self._cache_selection(req_index, cache_key, sink + recent, request_ids)
+            return self._cache_selection(req_index, cache_key, sink + recent, request_ids), False
 
         scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
         has_score_signal = scores is not None and any(
@@ -544,7 +612,7 @@ class H2OBlockPruner:
                 ranked = sorted(ranked_candidates, key=lambda index: (-scores[index], index))
                 reserved.update(ranked[:score_blocks])
             heavy = sorted(reserved)
-        return self._cache_selection(req_index, cache_key, heavy + recent, request_ids)
+        return self._cache_selection(req_index, cache_key, heavy + recent, request_ids), False
 
     def _selection_cache_key(
         self,
@@ -781,6 +849,35 @@ class H2OBlockPruner:
                 scores[index] = score * config.score_decay
         for index in selected:
             scores[index] += 1.0
+        self._advance_decode_step(req_index, request_ids)
+
+    def _touch_decode_step(
+        self,
+        req_index: int,
+        seq_len: int,
+        valid_blocks: int,
+        request_ids: Sequence[Any] | None,
+    ) -> None:
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is None:
+            return
+
+        last_seq_len = self._last_seq_lens.get(request_id)
+        if last_seq_len is not None and seq_len < last_seq_len:
+            self._scores.pop(request_id, None)
+            self._decode_steps.pop(request_id, None)
+            self._selection_cache.pop(request_id, None)
+
+        scores = self._scores.get(request_id)
+        if scores is not None:
+            if len(scores) < valid_blocks:
+                scores.extend([0.0] * (valid_blocks - len(scores)))
+            elif len(scores) > valid_blocks:
+                del scores[valid_blocks:]
+        self._last_seq_lens[request_id] = seq_len
+        self._advance_decode_step(req_index, request_ids)
+
+    def _advance_decode_step(self, req_index: int, request_ids: Sequence[Any] | None) -> None:
         request_id = self._get_request_id(req_index, request_ids)
         if request_id is not None:
             self._decode_steps[request_id] = self._decode_steps.get(request_id, 0) + 1

@@ -23,10 +23,12 @@ class H2OConfigStub:
     anchor_ratio: float = 0.25
     score_explore_ratio: float = 0.2
     score_coverage_ratio: float = 0.35
+    decode_full_attention_steps: int = 0
     decode_budget_fast_ratio: float = 0.45
     decode_budget_taper_steps: int = 256
     decode_budget_taper_start_step: int = 64
     selection_refresh_interval: int = 4
+    score_update_on_cache_hit: bool = False
     debug_log: bool = False
     debug_interval: int = 1
     debug_sample_requests: int = 3
@@ -87,6 +89,70 @@ def test_h2o_pruner_leaves_short_sequences_unchanged():
     assert torch.equal(new_tables, block_tables)
     assert torch.equal(new_lens, seq_lens)
     assert new_lens_list == [256]
+
+
+def test_h2o_pruner_reuses_existing_seq_lens_list():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(heavy_blocks=1, recent_blocks=2)
+    block_tables = torch.tensor([[10, 11, 12, 13, 14, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+        seq_lens_list=[5 * 128],
+    )
+
+    assert new_tables[0, :3].tolist() == [10, 13, 14]
+    assert new_lens.tolist() == [3 * 128]
+    assert new_lens_list == [3 * 128]
+
+
+def test_h2o_pruner_keeps_full_context_for_decode_warmup_steps():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=1,
+        recent_blocks=1,
+        adaptive_budget=False,
+        decode_full_attention_steps=2,
+    )
+    block_tables = torch.tensor([[50, 51, 52, 53, 54, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5 * 128], dtype=torch.int32)
+
+    first_tables, first_lens, first_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+    second_tables, second_lens, second_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+    third_tables, third_lens, third_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert torch.equal(first_tables, block_tables)
+    assert torch.equal(first_lens, seq_lens)
+    assert first_lens_list == [5 * 128]
+    assert torch.equal(second_tables, block_tables)
+    assert torch.equal(second_lens, seq_lens)
+    assert second_lens_list == [5 * 128]
+    assert third_tables[0, :2].tolist() == [50, 54]
+    assert third_lens.tolist() == [2 * 128]
+    assert third_lens_list == [2 * 128]
 
 
 def test_h2o_pruner_always_keeps_current_block():
@@ -290,6 +356,40 @@ def test_h2o_pruner_reuses_selection_between_refreshes():
     )
 
     assert refreshed_tables[0, :7].tolist() == [0, 1, 2, 3, 5, 7, 11]
+
+
+def test_h2o_pruner_skips_score_updates_on_cache_hit_by_default():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=6,
+        recent_blocks=1,
+        adaptive_budget=False,
+        anchor_ratio=0.0,
+        score_explore_ratio=0.5,
+        score_coverage_ratio=0.0,
+        selection_refresh_interval=4,
+    )
+    block_tables = torch.arange(12, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([12 * 128], dtype=torch.int32)
+
+    pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+    scores_after_first = list(pruner._scores["req-0"])
+    pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert pruner._scores["req-0"] == scores_after_first
+    assert pruner._decode_steps["req-0"] == 2
 
 
 def test_h2o_pruner_keeps_coverage_blocks_with_score_signal():
