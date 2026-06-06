@@ -329,9 +329,6 @@ class H2OBlockPruner:
     @staticmethod
     def _resolve_compact_metadata_width(max_selected_blocks: int, block_table_width: int, config: Any) -> int:
         metadata_width = max_selected_blocks
-        fast_blocks = getattr(config, "decode_budget_fast_blocks", None)
-        if fast_blocks is not None and max_selected_blocks <= int(fast_blocks):
-            return max(1, min(max(metadata_width, int(fast_blocks)), block_table_width))
         if (
             getattr(config, "adaptive_budget", True)
             and getattr(config, "max_blocks", None) is not None

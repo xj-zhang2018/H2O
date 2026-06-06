@@ -81,7 +81,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `adaptive_budget` | bool | `True` | When fixed block budgets are used, raise very small long-context budgets to `adaptive_min_keep_ratio`; when `max_blocks` is also set, `adaptive_precision_ratio` can further lift the selected-block target. |
 | `adaptive_min_keep_ratio` | float | `0.1` | Minimum selected-block ratio for fixed `heavy_blocks`/`recent_blocks` budgets. Set to `0` to disable this minimum-ratio lift. |
 | `adaptive_precision_ratio` | float | `0.6` | With fixed block budgets and `max_blocks`, lift the selected-block target to this ratio when the base cap would over-prune medium-long contexts. Set to `0` to make `max_blocks` a strict hard cap. |
-| `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. If the current context has no more blocks than this value, H2O keeps the full context and skips Python-side pruning to protect accuracy and avoid overhead on medium contexts. When `max_blocks` and `adaptive_precision_ratio` are active, compact block-table metadata is padded to this width while the selected-block budget is above an explicit `decode_budget_fast_blocks` target, then drops to that stable fast width after the taper completes. Set to `None` to allow the ratio-based lift without this full-context guard or static metadata padding. |
+| `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. If the current context has no more blocks than this value, H2O keeps the full context and skips Python-side pruning to protect accuracy and avoid overhead on medium contexts. When `max_blocks` and `adaptive_precision_ratio` are active, compact block-table metadata is padded to this width so decode graph shape stays stable while the effective selected-block budget tapers down through `seq_lens`. Set to `None` to allow the ratio-based lift without this full-context guard or static metadata padding. |
 | `sink_blocks` | int | `1` | Number of initial blocks reserved from the heavy budget for system prompts and attention sinks. |
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
 | `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |
@@ -130,7 +130,7 @@ Example:
 }
 ```
 
-For 10k input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O:
+For 10k input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Keep `decode_full_attention_steps` at `0` for the benchmark path so the first decode metadata build prunes to the precision budget instead of paying full-context attention:
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -141,7 +141,7 @@ vllm serve /path/to/model \
   --max-model-len 12288 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":48,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.80,"adaptive_precision_max_blocks":64,"min_prune_ratio":0.15,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.30,"score_explore_ratio":0.20,"score_coverage_ratio":0.45,"decode_full_attention_steps":1,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.0,"decode_budget_taper_steps":128,"decode_budget_taper_start_step":16,"selection_refresh_interval":16,"score_update_on_cache_hit":false,"debug_log":false}}'
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":48,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.80,"adaptive_precision_max_blocks":64,"min_prune_ratio":0.15,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.30,"score_explore_ratio":0.20,"score_coverage_ratio":0.45,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.0,"decode_budget_taper_steps":128,"decode_budget_taper_start_step":16,"selection_refresh_interval":16,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

@@ -590,14 +590,15 @@ def test_h2o_pruner_tapers_decode_budget_to_explicit_fast_blocks():
         request_ids=["req-0"],
     )
 
-    assert new_tables.shape == (1, 32)
+    assert new_tables.shape == (1, 64)
     assert new_tables[0, :4].tolist() == [0, 3, 7, 11]
-    assert new_tables[0, -16:].tolist() == list(range(64, 80))
+    assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
+    assert new_tables[0, 32:].tolist() == [0] * 32
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
 
 
-def test_h2o_pruner_keeps_precision_metadata_width_while_tapering():
+def test_h2o_pruner_prunes_first_decode_when_warmup_disabled():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
         heavy_blocks=48,
@@ -609,10 +610,10 @@ def test_h2o_pruner_keeps_precision_metadata_width_while_tapering():
         decode_budget_fast_blocks=32,
         decode_budget_fast_ratio=0.0,
         decode_budget_taper_steps=128,
-        decode_budget_taper_start_step=0,
+        decode_budget_taper_start_step=16,
+        decode_full_attention_steps=0,
         selection_refresh_interval=16,
     )
-    pruner._decode_steps["req-0"] = 64
     block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
     seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
 
@@ -625,10 +626,9 @@ def test_h2o_pruner_keeps_precision_metadata_width_while_tapering():
     )
 
     assert new_tables.shape == (1, 64)
-    assert new_tables[0, :48].tolist()[-16:] == list(range(64, 80))
-    assert new_tables[0, 48:].tolist() == [0] * 16
-    assert new_lens.tolist() == [48 * 128]
-    assert new_lens_list == [48 * 128]
+    assert new_tables[0, :64].tolist()[-16:] == list(range(64, 80))
+    assert new_lens.tolist() == [64 * 128]
+    assert new_lens_list == [64 * 128]
 
 
 def test_h2o_pruner_reuses_compact_metadata_indices_for_cached_selection():
@@ -669,7 +669,7 @@ def test_h2o_pruner_reuses_compact_metadata_indices_for_cached_selection():
     )
 
     assert pruner._compact_metadata_cache[1] is cached_indices
-    assert new_tables.shape == (1, 32)
+    assert new_tables.shape == (1, 64)
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
 
