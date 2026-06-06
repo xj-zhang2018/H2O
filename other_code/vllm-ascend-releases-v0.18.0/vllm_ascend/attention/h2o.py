@@ -585,32 +585,44 @@ class H2OBlockPruner:
         if remaining_heavy_blocks <= 0 or heavy_candidate_start >= heavy_candidate_end:
             return self._cache_selection(req_index, cache_key, sink + recent, request_ids), False
 
+        history_cluster_size = getattr(config, "history_cluster_size", 1)
         scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
         has_score_signal = scores is not None and any(
             score > 0 for score in scores[heavy_candidate_start:heavy_candidate_end])
         if not has_score_signal:
-            heavy = sink + self._evenly_spaced_blocks(
+            heavy = sink + self._clustered_evenly_spaced_blocks(
                 heavy_candidate_start,
                 heavy_candidate_end,
                 remaining_heavy_blocks,
+                history_cluster_size,
+                set(sink),
             )
         else:
-            anchor_blocks = min(
+            anchor_budget = min(
                 remaining_heavy_blocks,
                 math.ceil(remaining_heavy_blocks * getattr(config, "anchor_ratio", 0.25)),
             )
+            anchor_blocks = self._anchor_count_for_cluster_budget(anchor_budget, history_cluster_size)
             anchors = self._score_guided_anchor_blocks(
                 heavy_candidate_start,
                 heavy_candidate_end,
                 anchor_blocks,
                 scores,
             )
-            reserved = set(sink) | set(anchors)
+            clustered_anchors = self._cluster_blocks_around_anchors(
+                heavy_candidate_start,
+                heavy_candidate_end,
+                anchors,
+                anchor_budget,
+                history_cluster_size,
+                set(sink),
+            )
+            reserved = set(sink) | set(clustered_anchors)
             explore_ratio = getattr(config, "score_explore_ratio", 0.0)
             explore_blocks = 0
             if explore_ratio > 0:
                 explore_blocks = min(
-                    max(remaining_heavy_blocks - len(anchors), 0),
+                    max(remaining_heavy_blocks - len(clustered_anchors), 0),
                     math.ceil(remaining_heavy_blocks * explore_ratio),
                 )
             exploration = self._rotating_evenly_spaced_blocks(
@@ -665,6 +677,7 @@ class H2OBlockPruner:
             getattr(config, "anchor_ratio", 0.25),
             getattr(config, "score_explore_ratio", 0.0),
             getattr(config, "score_coverage_ratio", 0.0),
+            getattr(config, "history_cluster_size", 1),
         )
 
     def _get_cached_selection(
@@ -738,6 +751,85 @@ class H2OBlockPruner:
                 if len(anchors) == count:
                     break
         return sorted(anchors)
+
+    @staticmethod
+    def _anchor_count_for_cluster_budget(block_budget: int, cluster_size: int) -> int:
+        if block_budget <= 0:
+            return 0
+        cluster_size = max(int(cluster_size), 1)
+        return max(1, math.ceil(block_budget / cluster_size))
+
+    @staticmethod
+    def _clustered_evenly_spaced_blocks(
+        start: int,
+        end: int,
+        count: int,
+        cluster_size: int,
+        excluded: set[int],
+    ) -> list[int]:
+        if cluster_size <= 1:
+            return H2OBlockPruner._coverage_blocks(start, end, count, excluded)
+        anchor_count = H2OBlockPruner._anchor_count_for_cluster_budget(count, cluster_size)
+        anchors = H2OBlockPruner._evenly_spaced_blocks(start, end, anchor_count)
+        return H2OBlockPruner._cluster_blocks_around_anchors(
+            start,
+            end,
+            anchors,
+            count,
+            cluster_size,
+            excluded,
+        )
+
+    @staticmethod
+    def _cluster_blocks_around_anchors(
+        start: int,
+        end: int,
+        anchors: Sequence[int],
+        budget: int,
+        cluster_size: int,
+        excluded: set[int],
+    ) -> list[int]:
+        if budget <= 0 or start >= end:
+            return []
+        cluster_size = max(int(cluster_size), 1)
+        selected: list[int] = []
+        seen = set(excluded)
+
+        offsets = [0]
+        distance = 1
+        while len(offsets) < cluster_size:
+            offsets.append(distance)
+            if len(offsets) < cluster_size:
+                offsets.append(-distance)
+            distance += 1
+
+        for anchor in anchors:
+            for offset in offsets:
+                candidate = anchor + offset
+                if candidate < start or candidate >= end or candidate in seen:
+                    continue
+                selected.append(candidate)
+                seen.add(candidate)
+                if len(selected) == budget:
+                    return sorted(selected)
+
+        if len(selected) < budget:
+            for candidate in H2OBlockPruner._evenly_spaced_blocks(start, end, min(end - start, budget * 2)):
+                if candidate in seen:
+                    continue
+                selected.append(candidate)
+                seen.add(candidate)
+                if len(selected) == budget:
+                    return sorted(selected)
+        if len(selected) < budget:
+            for candidate in range(start, end):
+                if candidate in seen:
+                    continue
+                selected.append(candidate)
+                seen.add(candidate)
+                if len(selected) == budget:
+                    break
+        return sorted(selected)
 
     @staticmethod
     def _evenly_spaced_blocks(start: int, end: int, count: int) -> list[int]:

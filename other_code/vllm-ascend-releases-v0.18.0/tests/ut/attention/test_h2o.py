@@ -24,6 +24,7 @@ class H2OConfigStub:
     score_explore_ratio: float = 0.2
     score_coverage_ratio: float = 0.35
     min_prune_ratio: float = 0.0
+    history_cluster_size: int = 1
     decode_full_attention_steps: int = 0
     decode_budget_fast_ratio: float = 0.45
     decode_budget_taper_steps: int = 256
@@ -165,6 +166,30 @@ def test_h2o_pruner_skips_compaction_when_prune_ratio_is_too_small():
     assert new_lens is seq_lens
     assert new_lens_list == [5 * 128]
     assert pruner._decode_steps["req-0"] == 1
+
+
+def test_h2o_pruner_clusters_cold_start_history_blocks():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=6,
+        recent_blocks=1,
+        adaptive_budget=False,
+        history_cluster_size=2,
+    )
+    block_tables = torch.arange(12, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([12 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :7].tolist() == [0, 2, 3, 6, 7, 9, 11]
+    assert new_lens.tolist() == [7 * 128]
+    assert new_lens_list == [7 * 128]
 
 
 def test_h2o_pruner_keeps_full_context_for_decode_warmup_steps():
@@ -321,6 +346,35 @@ def test_h2o_pruner_uses_scores_for_historical_anchors():
     )
 
     assert new_tables[0, :7].tolist() == [0, 4, 8, 12, 16, 18, 19]
+    assert new_lens.tolist() == [7 * 128]
+    assert new_lens_list == [7 * 128]
+
+
+def test_h2o_pruner_clusters_score_guided_anchors():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=6,
+        recent_blocks=1,
+        adaptive_budget=False,
+        anchor_ratio=1.0,
+        history_cluster_size=2,
+    )
+    pruner._scores["req-0"] = [0.0] * 12
+    for block in (4, 8):
+        pruner._scores["req-0"][block] = 10.0
+
+    block_tables = torch.arange(12, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([12 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables[0, :7].tolist() == [0, 2, 3, 4, 5, 8, 11]
     assert new_lens.tolist() == [7 * 128]
     assert new_lens_list == [7 * 128]
 
