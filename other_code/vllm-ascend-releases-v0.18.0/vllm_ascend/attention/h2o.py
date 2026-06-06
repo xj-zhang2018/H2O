@@ -369,7 +369,7 @@ class H2OBlockPruner:
         fast_target = math.ceil(valid_blocks * fast_ratio)
         max_blocks = getattr(config, "max_blocks", None)
         if max_blocks is not None:
-            fast_target = max(fast_target, min(max_blocks, valid_blocks))
+            fast_target = min(fast_target, max_blocks)
 
         min_heavy_blocks = min(heavy_blocks, getattr(config, "sink_blocks", 1))
         min_total = min(valid_blocks, recent_blocks + min_heavy_blocks)

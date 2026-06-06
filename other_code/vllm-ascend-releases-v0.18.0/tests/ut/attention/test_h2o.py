@@ -343,6 +343,6 @@ def test_h2o_pruner_tapers_decode_budget_for_later_steps():
         request_ids=["req-0"],
     )
 
-    assert new_tables[0, :36].tolist()[-16:] == list(range(64, 80))
-    assert new_lens.tolist() == [36 * 128]
-    assert new_lens_list == [36 * 128]
+    assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
+    assert new_lens.tolist() == [32 * 128]
+    assert new_lens_list == [32 * 128]
