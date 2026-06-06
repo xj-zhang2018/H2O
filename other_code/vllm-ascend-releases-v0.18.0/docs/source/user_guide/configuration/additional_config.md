@@ -75,13 +75,13 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `recent_ratio` | float | `0.1` | Recent token budget ratio, rounded up to KV-cache blocks. |
 | `heavy_blocks` | int | `None` | Optional fixed heavy-hitter block budget. Overrides `heavy_ratio` when set. |
 | `recent_blocks` | int | `None` | Optional fixed recent block budget. Overrides `recent_ratio` when set. |
-| `max_blocks` | int | `None` | Optional cap on selected blocks per request. When `adaptive_budget` and `adaptive_precision_ratio` are enabled, this is treated as the base cap and may be lifted for accuracy-sensitive medium-long contexts. Recent blocks are kept first. |
+| `max_blocks` | int | `None` | Optional cap on selected blocks per request. When `adaptive_budget` and `adaptive_precision_ratio` are enabled, this is treated as the base cap and may be lifted or bypassed for accuracy-sensitive contexts. Recent blocks are kept first. |
 | `min_seq_len` | int | `0` | Minimum sequence length before H2O pruning is applied. |
 | `score_decay` | float | `1.0` | Decay for the lightweight retained-block score proxy. Must be in `(0, 1]`. |
 | `adaptive_budget` | bool | `True` | When fixed block budgets are used, raise very small long-context budgets to `adaptive_min_keep_ratio`; when `max_blocks` is also set, `adaptive_precision_ratio` can further lift the selected-block target. |
 | `adaptive_min_keep_ratio` | float | `0.1` | Minimum selected-block ratio for fixed `heavy_blocks`/`recent_blocks` budgets. Set to `0` to disable this minimum-ratio lift. |
 | `adaptive_precision_ratio` | float | `0.6` | With fixed block budgets and `max_blocks`, lift the selected-block target to this ratio when the base cap would over-prune medium-long contexts. Set to `0` to make `max_blocks` a strict hard cap. |
-| `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. Set to `None` to allow the ratio-based lift without an extra block cap. |
+| `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. If the current context has no more blocks than this value, H2O keeps the full context and skips Python-side pruning to protect accuracy and avoid overhead on medium contexts. Set to `None` to allow the ratio-based lift without this full-context guard. |
 | `sink_blocks` | int | `1` | Number of initial blocks reserved from the heavy budget for system prompts and attention sinks. |
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
 | `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |

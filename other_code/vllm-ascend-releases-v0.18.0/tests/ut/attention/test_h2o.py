@@ -151,7 +151,7 @@ def test_h2o_pruner_can_keep_max_blocks_strict_when_precision_lift_disabled():
     assert new_lens_list == [6 * 128]
 
 
-def test_h2o_pruner_lifts_low_max_blocks_for_medium_long_context():
+def test_h2o_pruner_keeps_full_context_under_precision_cap():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
         heavy_blocks=16,
@@ -170,55 +170,9 @@ def test_h2o_pruner_lifts_low_max_blocks_for_medium_long_context():
         request_ids=["req-0"],
     )
 
-    assert new_tables[0, :45].tolist() == [
-        0,
-        2,
-        4,
-        6,
-        8,
-        10,
-        12,
-        14,
-        16,
-        18,
-        20,
-        22,
-        24,
-        26,
-        28,
-        31,
-        33,
-        35,
-        37,
-        39,
-        41,
-        43,
-        45,
-        47,
-        49,
-        51,
-        53,
-        55,
-        57,
-        59,
-        60,
-        61,
-        62,
-        63,
-        64,
-        65,
-        66,
-        67,
-        68,
-        69,
-        70,
-        71,
-        72,
-        73,
-        74,
-    ]
-    assert new_lens.tolist() == [45 * 128]
-    assert new_lens_list == [45 * 128]
+    assert torch.equal(new_tables, block_tables)
+    assert torch.equal(new_lens, seq_lens)
+    assert new_lens_list == [75 * 128]
 
 
 def test_h2o_pruner_uses_scores_for_historical_anchors():
@@ -382,8 +336,8 @@ def test_h2o_pruner_tapers_decode_budget_for_later_steps():
         decode_budget_taper_start_step=0,
     )
     pruner._decode_steps["req-0"] = 128
-    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
-    seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
+    block_tables = torch.arange(160, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([160 * 128], dtype=torch.int32)
 
     new_tables, new_lens, new_lens_list = pruner.apply(
         block_tables=block_tables,
@@ -393,6 +347,6 @@ def test_h2o_pruner_tapers_decode_budget_for_later_steps():
         request_ids=["req-0"],
     )
 
-    assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
+    assert new_tables[0, :32].tolist()[-16:] == list(range(144, 160))
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]

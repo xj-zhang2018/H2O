@@ -58,6 +58,12 @@ class H2OBlockPruner:
         if block_size <= 0:
             return block_tables, seq_lens, seq_lens_list
 
+        valid_block_counts = [
+            math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in seq_lens_list
+        ]
+        if self._can_keep_original_metadata(seq_lens_list, valid_block_counts, config):
+            return block_tables, seq_lens, seq_lens_list
+
         new_block_tables = torch.empty_like(block_tables)
         new_seq_lens = torch.empty_like(seq_lens)
         changed = False
@@ -71,7 +77,7 @@ class H2OBlockPruner:
                 new_seq_lens[req_index] = 0
                 continue
 
-            valid_blocks = math.ceil(seq_len / block_size)
+            valid_blocks = valid_block_counts[req_index]
             total_original_blocks += valid_blocks
             if seq_len < config.min_seq_len:
                 self._copy_original_row(
@@ -93,6 +99,28 @@ class H2OBlockPruner:
                         valid_blocks,
                         valid_blocks,
                         "short",
+                    )
+                continue
+            if self._should_keep_full_context(valid_blocks, config):
+                self._copy_original_row(
+                    new_block_tables,
+                    block_tables,
+                    new_seq_lens,
+                    req_index,
+                    seq_len,
+                )
+                total_kept_blocks += valid_blocks
+                if debug_log:
+                    self._append_debug_sample(
+                        sample_requests,
+                        config,
+                        request_ids,
+                        req_index,
+                        seq_len,
+                        seq_len,
+                        valid_blocks,
+                        valid_blocks,
+                        "precision-full",
                     )
                 continue
 
@@ -185,6 +213,24 @@ class H2OBlockPruner:
         if not changed:
             return block_tables, seq_lens, [int(x) for x in seq_lens.tolist()]
         return new_block_tables, new_seq_lens, seq_lens_list
+
+    @staticmethod
+    def _can_keep_original_metadata(
+        seq_lens: Sequence[int],
+        valid_block_counts: Sequence[int],
+        config: Any,
+    ) -> bool:
+        if not seq_lens:
+            return True
+        for seq_len, valid_blocks in zip(seq_lens, valid_block_counts):
+            if seq_len <= 0:
+                continue
+            if seq_len < config.min_seq_len:
+                continue
+            if H2OBlockPruner._should_keep_full_context(valid_blocks, config):
+                continue
+            return False
+        return True
 
     def _log_debug_summary(
         self,
@@ -315,6 +361,8 @@ class H2OBlockPruner:
         precision_ratio = getattr(config, "adaptive_precision_ratio", 0.0)
         if precision_ratio <= 0:
             return None
+        if H2OBlockPruner._should_keep_full_context(valid_blocks, config):
+            return valid_blocks
 
         precision_blocks = math.ceil(valid_blocks * precision_ratio)
         precision_max_blocks = getattr(config, "adaptive_precision_max_blocks", None)
@@ -328,6 +376,20 @@ class H2OBlockPruner:
         if not getattr(config, "adaptive_budget", True):
             return False
         return config.heavy_blocks is not None or config.recent_blocks is not None
+
+    @staticmethod
+    def _should_keep_full_context(valid_blocks: int, config: Any) -> bool:
+        if valid_blocks <= 0:
+            return True
+        if not getattr(config, "adaptive_budget", True):
+            return False
+        if getattr(config, "max_blocks", None) is None:
+            return False
+        if getattr(config, "adaptive_precision_ratio", 0.0) <= 0:
+            return False
+
+        precision_max_blocks = getattr(config, "adaptive_precision_max_blocks", None)
+        return precision_max_blocks is not None and valid_blocks <= precision_max_blocks
 
     @staticmethod
     def _blocks_from_budget(
@@ -356,6 +418,8 @@ class H2OBlockPruner:
         fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
         taper_steps = getattr(config, "decode_budget_taper_steps", 0)
         if fast_ratio <= 0 or taper_steps <= 0:
+            return heavy_blocks, recent_blocks
+        if self._should_keep_full_context(valid_blocks, config):
             return heavy_blocks, recent_blocks
 
         current_total = heavy_blocks + recent_blocks
