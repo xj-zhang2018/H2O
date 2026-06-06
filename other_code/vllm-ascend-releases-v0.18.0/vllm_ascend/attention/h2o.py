@@ -37,7 +37,8 @@ class H2OBlockPruner:
         self._scores: dict[Any, list[float]] = {}
         self._last_seq_lens: dict[Any, int] = {}
         self._decode_steps: dict[Any, int] = {}
-        self._selection_cache: dict[Any, tuple[tuple[Any, ...], list[int]]] = {}
+        self._selection_cache: dict[Any, tuple[tuple[Any, ...], tuple[int, ...]]] = {}
+        self._compact_metadata_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
         self._debug_step = 0
         self._debug_seen_pruned = False
 
@@ -80,7 +81,7 @@ class H2OBlockPruner:
         total_original_blocks = 0
         total_kept_blocks = 0
         sample_requests: list[str] = []
-        selected_block_rows: list[list[int]] = []
+        selected_block_rows: list[Sequence[int]] = []
         score_updates: list[tuple[int, int, int, Sequence[int] | None, bool]] = []
 
         for req_index, seq_len in enumerate(resolved_seq_lens):
@@ -181,12 +182,6 @@ class H2OBlockPruner:
                 config,
                 request_ids,
             )
-            if not selected:
-                selected = [valid_blocks - 1]
-            elif selected[-1] != valid_blocks - 1:
-                selected.append(valid_blocks - 1)
-            selected = sorted(set(selected))
-
             compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
             selected_block_rows.append(selected)
             resolved_seq_lens[req_index] = compact_len
@@ -229,7 +224,7 @@ class H2OBlockPruner:
             return block_tables, seq_lens, original_seq_lens
 
         self._apply_score_updates(score_updates, config, request_ids)
-        return self._build_compact_metadata(block_tables, seq_lens, selected_block_rows, resolved_seq_lens)
+        return self._build_compact_metadata(block_tables, seq_lens, selected_block_rows, resolved_seq_lens, config)
 
     def _can_keep_original_metadata(
         self,
@@ -287,34 +282,62 @@ class H2OBlockPruner:
         for req_index, seq_len, valid_blocks, _, _ in score_updates:
             self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
 
-    @staticmethod
     def _build_compact_metadata(
+        self,
         block_tables: torch.Tensor,
         seq_lens: torch.Tensor,
         selected_block_rows: Sequence[Sequence[int]],
         compact_seq_lens: Sequence[int],
+        config: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
         max_selected_blocks = max((len(row) for row in selected_block_rows), default=1)
         max_selected_blocks = max(max_selected_blocks, 1)
-        gather_rows = []
-        for selected in selected_block_rows:
-            row = list(selected) or [0]
-            if len(row) < max_selected_blocks:
-                row = row + [0] * (max_selected_blocks - len(row))
-            gather_rows.append(row)
-
-        gather_indices = torch.tensor(
-            gather_rows,
-            dtype=torch.long,
-            device=block_tables.device,
+        metadata_width = self._resolve_compact_metadata_width(
+            max_selected_blocks,
+            block_tables.shape[1],
+            config,
         )
+        selected_rows = tuple(tuple(row) if row else (0,) for row in selected_block_rows)
+        cache_key = (str(block_tables.device), block_tables.shape[0], block_tables.shape[1], metadata_width,
+                     selected_rows)
+        cached = self._compact_metadata_cache
+        if cached is not None and cached[0] == cache_key:
+            gather_indices = cached[1]
+        else:
+            gather_rows = []
+            for selected in selected_rows:
+                row = list(selected)
+                if len(row) < metadata_width:
+                    row = row + [0] * (metadata_width - len(row))
+                gather_rows.append(row)
+
+            gather_indices = torch.as_tensor(
+                gather_rows,
+                dtype=torch.long,
+                device=block_tables.device,
+            )
+            self._compact_metadata_cache = (cache_key, gather_indices)
         new_block_tables = block_tables.gather(1, gather_indices)
+        compact_seq_lens_list = [int(seq_len) for seq_len in compact_seq_lens]
         new_seq_lens = torch.tensor(
-            [int(seq_len) for seq_len in compact_seq_lens],
+            compact_seq_lens_list,
             dtype=seq_lens.dtype,
             device=seq_lens.device,
         )
-        return new_block_tables, new_seq_lens, [int(seq_len) for seq_len in compact_seq_lens]
+        return new_block_tables, new_seq_lens, compact_seq_lens_list
+
+    @staticmethod
+    def _resolve_compact_metadata_width(max_selected_blocks: int, block_table_width: int, config: Any) -> int:
+        metadata_width = max_selected_blocks
+        if (
+            getattr(config, "adaptive_budget", True)
+            and getattr(config, "max_blocks", None) is not None
+            and getattr(config, "adaptive_precision_ratio", 0.0) > 0
+        ):
+            precision_max_blocks = getattr(config, "adaptive_precision_max_blocks", None)
+            if precision_max_blocks is not None:
+                metadata_width = max(metadata_width, int(precision_max_blocks))
+        return max(1, min(metadata_width, block_table_width))
 
     @staticmethod
     def _has_enough_pruning_savings(total_original_blocks: int, total_kept_blocks: int, config: Any) -> bool:
@@ -563,7 +586,7 @@ class H2OBlockPruner:
         recent_blocks: int,
         config: Any,
         request_ids: Sequence[Any] | None,
-    ) -> tuple[list[int], bool]:
+    ) -> tuple[Sequence[int], bool]:
         cache_key = self._selection_cache_key(
             req_index,
             valid_blocks,
@@ -580,14 +603,14 @@ class H2OBlockPruner:
         recent = list(range(recent_start, valid_blocks))
         heavy_candidate_end = recent_start
         if heavy_blocks <= 0 or heavy_candidate_end <= 0:
-            return self._cache_selection(req_index, cache_key, recent, request_ids), False
+            return self._cache_selection(req_index, cache_key, recent, valid_blocks, request_ids), False
 
         sink_blocks = min(getattr(config, "sink_blocks", 1), heavy_blocks, heavy_candidate_end)
         sink = list(range(sink_blocks))
         remaining_heavy_blocks = heavy_blocks - len(sink)
         heavy_candidate_start = sink_blocks
         if remaining_heavy_blocks <= 0 or heavy_candidate_start >= heavy_candidate_end:
-            return self._cache_selection(req_index, cache_key, sink + recent, request_ids), False
+            return self._cache_selection(req_index, cache_key, sink + recent, valid_blocks, request_ids), False
 
         history_cluster_size = getattr(config, "history_cluster_size", 1)
         scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
@@ -659,7 +682,7 @@ class H2OBlockPruner:
                 ranked = sorted(ranked_candidates, key=lambda index: (-scores[index], index))
                 reserved.update(ranked[:score_blocks])
             heavy = sorted(reserved)
-        return self._cache_selection(req_index, cache_key, heavy + recent, request_ids), False
+        return self._cache_selection(req_index, cache_key, heavy + recent, valid_blocks, request_ids), False
 
     def _selection_cache_key(
         self,
@@ -690,7 +713,7 @@ class H2OBlockPruner:
         cache_key: tuple[Any, ...] | None,
         config: Any,
         request_ids: Sequence[Any] | None,
-    ) -> list[int] | None:
+    ) -> tuple[int, ...] | None:
         if cache_key is None:
             return None
         refresh_interval = getattr(config, "selection_refresh_interval", 1)
@@ -706,21 +729,37 @@ class H2OBlockPruner:
         cached_key, cached_selection = cached
         if cached_key != cache_key:
             return None
-        return list(cached_selection)
+        return cached_selection
 
     def _cache_selection(
         self,
         req_index: int,
         cache_key: tuple[Any, ...] | None,
-        selected: list[int],
+        selected: Sequence[int],
+        valid_blocks: int,
         request_ids: Sequence[Any] | None,
-    ) -> list[int]:
+    ) -> tuple[int, ...]:
+        selected_tuple = self._ensure_current_block_selected(selected, valid_blocks)
         if cache_key is None:
-            return selected
+            return selected_tuple
         request_id = self._get_request_id(req_index, request_ids)
         if request_id is not None:
-            self._selection_cache[request_id] = (cache_key, list(selected))
-        return selected
+            self._selection_cache[request_id] = (cache_key, selected_tuple)
+        return selected_tuple
+
+    @staticmethod
+    def _ensure_current_block_selected(selected: Sequence[int], valid_blocks: int) -> tuple[int, ...]:
+        current_block = valid_blocks - 1
+        if current_block < 0:
+            return (0,)
+        if not selected:
+            return (current_block,)
+        selected_tuple = tuple(selected)
+        if selected_tuple[-1] == current_block:
+            return selected_tuple
+        if current_block not in selected_tuple:
+            selected_tuple = selected_tuple + (current_block,)
+        return tuple(sorted(set(selected_tuple)))
 
     @staticmethod
     def _score_guided_anchor_blocks(start: int, end: int, count: int, scores: Sequence[float]) -> list[int]:
@@ -974,10 +1013,12 @@ class H2OBlockPruner:
         if config.score_decay < 1.0:
             for index, score in enumerate(scores):
                 scores[index] = score * config.score_decay
-        selected_set = set(selected)
         recent_start = valid_blocks
-        while recent_start > 0 and recent_start - 1 in selected_set:
-            recent_start -= 1
+        for index in reversed(selected):
+            if index == recent_start - 1:
+                recent_start -= 1
+            elif index < recent_start - 1:
+                break
         recent_blocks = valid_blocks - recent_start
         sink_blocks = min(getattr(config, "sink_blocks", 1), valid_blocks)
         for index in selected:
@@ -1041,6 +1082,8 @@ class H2OBlockPruner:
         block_size: int,
     ) -> int:
         last_block_tokens = seq_len - (valid_blocks - 1) * block_size
+        if selected and selected[-1] == valid_blocks - 1:
+            return (len(selected) - 1) * block_size + last_block_tokens
         total = 0
         for block_index in selected:
             total += last_block_tokens if block_index == valid_blocks - 1 else block_size
