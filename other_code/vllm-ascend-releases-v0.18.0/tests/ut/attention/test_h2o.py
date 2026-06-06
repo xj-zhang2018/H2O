@@ -26,6 +26,7 @@ class H2OConfigStub:
     min_prune_ratio: float = 0.0
     history_cluster_size: int = 1
     decode_full_attention_steps: int = 0
+    decode_budget_fast_blocks: int | None = None
     decode_budget_fast_ratio: float = 0.45
     decode_budget_taper_steps: int = 256
     decode_budget_taper_start_step: int = 64
@@ -560,3 +561,61 @@ def test_h2o_pruner_tapers_decode_budget_for_later_steps():
     assert new_tables[0, :32].tolist()[-16:] == list(range(144, 160))
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
+
+
+def test_h2o_pruner_tapers_decode_budget_to_explicit_fast_blocks():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=48,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.8,
+        adaptive_precision_max_blocks=64,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.0,
+        decode_budget_taper_steps=128,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=16,
+    )
+    pruner._decode_steps["req-0"] = 128
+    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables.shape == (1, 32)
+    assert new_tables[0, :4].tolist() == [0, 3, 7, 11]
+    assert new_tables[0, -16:].tolist() == list(range(64, 80))
+    assert new_lens.tolist() == [32 * 128]
+    assert new_lens_list == [32 * 128]
+
+
+def test_h2o_pruner_recent_blocks_build_stronger_score_proxy():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=2,
+        recent_blocks=3,
+        adaptive_budget=False,
+        sink_blocks=1,
+    )
+    block_tables = torch.arange(10, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([10 * 128], dtype=torch.int32)
+
+    pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    scores = pruner._scores["req-0"]
+    assert scores[0] > scores[2]
+    assert scores[9] > scores[7] > scores[2]

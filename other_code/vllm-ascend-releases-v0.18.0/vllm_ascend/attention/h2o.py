@@ -501,9 +501,10 @@ class H2OBlockPruner:
         config: Any,
         request_ids: Sequence[Any] | None,
     ) -> tuple[int, int]:
+        fast_blocks = getattr(config, "decode_budget_fast_blocks", None)
         fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
         taper_steps = getattr(config, "decode_budget_taper_steps", 0)
-        if fast_ratio <= 0 or taper_steps <= 0:
+        if (fast_blocks is None and fast_ratio <= 0) or taper_steps <= 0:
             return heavy_blocks, recent_blocks
         if self._should_keep_full_context(valid_blocks, config):
             return heavy_blocks, recent_blocks
@@ -517,7 +518,10 @@ class H2OBlockPruner:
         if decode_step <= 0:
             return heavy_blocks, recent_blocks
 
-        fast_target = math.ceil(valid_blocks * fast_ratio)
+        if fast_blocks is None:
+            fast_target = math.ceil(valid_blocks * fast_ratio)
+        else:
+            fast_target = fast_blocks
         max_blocks = getattr(config, "max_blocks", None)
         if max_blocks is not None:
             fast_target = min(fast_target, max_blocks)
@@ -970,8 +974,20 @@ class H2OBlockPruner:
         if config.score_decay < 1.0:
             for index, score in enumerate(scores):
                 scores[index] = score * config.score_decay
+        selected_set = set(selected)
+        recent_start = valid_blocks
+        while recent_start > 0 and recent_start - 1 in selected_set:
+            recent_start -= 1
+        recent_blocks = valid_blocks - recent_start
+        sink_blocks = min(getattr(config, "sink_blocks", 1), valid_blocks)
         for index in selected:
-            scores[index] += 1.0
+            increment = 1.0
+            if index < sink_blocks:
+                increment += 0.25
+            if recent_blocks > 0 and index >= recent_start:
+                recency_rank = index - recent_start + 1
+                increment += 0.75 * recency_rank / recent_blocks
+            scores[index] += increment
         self._advance_decode_step(req_index, request_ids)
 
     def _touch_decode_step(

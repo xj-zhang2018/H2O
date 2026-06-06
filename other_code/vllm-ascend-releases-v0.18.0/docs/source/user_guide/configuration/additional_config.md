@@ -89,7 +89,8 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `min_prune_ratio` | float | `0.0` | Minimum batch-level pruned-block ratio required before compact block-table metadata is built. Set this above `0` to keep original metadata when the selected budget would not save enough attention work to offset Python/NPU metadata overhead. |
 | `history_cluster_size` | int | `1` | Number of adjacent historical blocks to prefer around each selected historical anchor. Values greater than `1` improve local context continuity for accuracy-sensitive long prompts without increasing the selected-block budget. |
 | `decode_full_attention_steps` | int | `0` | Number of initial decode metadata builds per request that keep the original full context before H2O pruning starts. This can reduce TTFT impact and protect early-token quality for long prompts. |
-| `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper. Set to `0` to disable tapering. When `max_blocks` is set, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
+| `decode_budget_fast_blocks` | int | `None` | Optional explicit selected-block target after the decode budget taper. When set, it takes precedence over `decode_budget_fast_ratio` so long-running decode can converge to a predictable acceleration-oriented block count. |
+| `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper when `decode_budget_fast_blocks` is unset. Set to `0` to disable ratio-based tapering. When `max_blocks` is set, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
 | `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
 | `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
 | `selection_refresh_interval` | int | `4` | Number of decode steps between score-guided historical block reselections when the selected-block budget is stable. Set to `1` to recompute every step. Budget or context-length changes still refresh immediately. |
@@ -117,6 +118,7 @@ Example:
         "min_prune_ratio": 0.0,
         "history_cluster_size": 1,
         "decode_full_attention_steps": 8,
+        "decode_budget_fast_blocks": null,
         "decode_budget_fast_ratio": 0.45,
         "decode_budget_taper_steps": 256,
         "decode_budget_taper_start_step": 64,
@@ -139,7 +141,7 @@ vllm serve /path/to/model \
   --max-model-len 12288 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":44,"recent_blocks":20,"max_blocks":56,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.82,"adaptive_precision_max_blocks":64,"min_prune_ratio":0.15,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.35,"score_explore_ratio":0.15,"score_coverage_ratio":0.45,"decode_full_attention_steps":1,"decode_budget_fast_ratio":0.70,"decode_budget_taper_steps":128,"decode_budget_taper_start_step":64,"selection_refresh_interval":16,"score_update_on_cache_hit":false,"debug_log":false}}'
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":48,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.80,"adaptive_precision_max_blocks":64,"min_prune_ratio":0.15,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.30,"score_explore_ratio":0.20,"score_coverage_ratio":0.45,"decode_full_attention_steps":1,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.0,"decode_budget_taper_steps":128,"decode_budget_taper_start_step":16,"selection_refresh_interval":16,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

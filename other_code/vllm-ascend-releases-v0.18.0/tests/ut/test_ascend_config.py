@@ -74,6 +74,7 @@ class TestAscendConfig(TestBase):
                 "score_coverage_ratio": 0.4,
                 "min_prune_ratio": 0.25,
                 "history_cluster_size": 2,
+                "decode_budget_fast_blocks": 24,
                 "decode_budget_fast_ratio": 0.42,
                 "decode_budget_taper_steps": 192,
                 "decode_budget_taper_start_step": 32,
@@ -104,6 +105,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.score_coverage_ratio, 0.4)
         self.assertEqual(ascend_config.h2o_config.min_prune_ratio, 0.25)
         self.assertEqual(ascend_config.h2o_config.history_cluster_size, 2)
+        self.assertEqual(ascend_config.h2o_config.decode_budget_fast_blocks, 24)
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_ratio, 0.42)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_steps, 192)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_start_step, 32)

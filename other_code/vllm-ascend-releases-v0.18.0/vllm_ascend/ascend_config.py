@@ -401,6 +401,7 @@ class H2OConfig:
         self.min_prune_ratio = float(h2o_config.get("min_prune_ratio", 0.0))
         self.history_cluster_size = int(h2o_config.get("history_cluster_size", 1))
         self.decode_full_attention_steps = int(h2o_config.get("decode_full_attention_steps", 0))
+        self.decode_budget_fast_blocks = h2o_config.get("decode_budget_fast_blocks", None)
         self.decode_budget_fast_ratio = float(h2o_config.get("decode_budget_fast_ratio", 0.45))
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))
         self.decode_budget_taper_start_step = int(h2o_config.get("decode_budget_taper_start_step", 64))
@@ -427,6 +428,7 @@ class H2OConfig:
                 f"min_prune_ratio={self.min_prune_ratio}, "
                 f"history_cluster_size={self.history_cluster_size}, "
                 f"decode_full_attention_steps={self.decode_full_attention_steps}, "
+                f"decode_budget_fast_blocks={self.decode_budget_fast_blocks}, "
                 f"decode_budget_fast_ratio={self.decode_budget_fast_ratio}, "
                 f"decode_budget_taper_steps={self.decode_budget_taper_steps}, "
                 f"decode_budget_taper_start_step={self.decode_budget_taper_start_step}, "
@@ -453,10 +455,13 @@ class H2OConfig:
         self._validate_optional_blocks("max_blocks", self.max_blocks)
         self._validate_optional_blocks("adaptive_precision_max_blocks", self.adaptive_precision_max_blocks)
         self._validate_optional_blocks("sink_blocks", self.sink_blocks)
+        self._validate_optional_blocks("decode_budget_fast_blocks", self.decode_budget_fast_blocks)
         if self.max_blocks == 0:
             raise ValueError("h2o_config.max_blocks must be greater than 0 when set")
         if self.adaptive_precision_max_blocks == 0:
             raise ValueError("h2o_config.adaptive_precision_max_blocks must be greater than 0 when set")
+        if self.decode_budget_fast_blocks == 0:
+            raise ValueError("h2o_config.decode_budget_fast_blocks must be greater than 0 when set")
         if self.min_seq_len < 0:
             raise ValueError("h2o_config.min_seq_len must be non-negative")
         if not 0 < self.score_decay <= 1.0:
