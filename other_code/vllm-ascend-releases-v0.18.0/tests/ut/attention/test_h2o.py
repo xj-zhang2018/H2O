@@ -26,6 +26,7 @@ class H2OConfigStub:
     decode_budget_fast_ratio: float = 0.45
     decode_budget_taper_steps: int = 256
     decode_budget_taper_start_step: int = 64
+    selection_refresh_interval: int = 4
     debug_log: bool = False
     debug_interval: int = 1
     debug_sample_requests: int = 3
@@ -257,6 +258,7 @@ def test_h2o_pruner_explores_historical_blocks_with_score_signal():
         anchor_ratio=0.0,
         score_explore_ratio=0.5,
         score_coverage_ratio=0.0,
+        selection_refresh_interval=1,
     )
     pruner._scores["req-0"] = [0.0] * 12
     for block in (1, 2, 3, 4, 5):
@@ -286,6 +288,54 @@ def test_h2o_pruner_explores_historical_blocks_with_score_signal():
     )
 
     assert new_tables[0, :7].tolist() == [0, 1, 2, 3, 5, 8, 11]
+
+
+def test_h2o_pruner_reuses_selection_between_refreshes():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=6,
+        recent_blocks=1,
+        adaptive_budget=False,
+        anchor_ratio=0.0,
+        score_explore_ratio=0.5,
+        score_coverage_ratio=0.0,
+        selection_refresh_interval=4,
+    )
+    pruner._scores["req-0"] = [0.0] * 12
+    for block in (1, 2, 3, 4, 5):
+        pruner._scores["req-0"][block] = 10.0
+
+    block_tables = torch.arange(12, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([12 * 128], dtype=torch.int32)
+
+    first_tables, _, _ = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+    second_tables, _, _ = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert first_tables[0, :7].tolist() == [0, 1, 2, 3, 4, 7, 11]
+    assert second_tables[0, :7].tolist() == [0, 1, 2, 3, 4, 7, 11]
+
+    pruner._decode_steps["req-0"] = 4
+    refreshed_tables, _, _ = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert refreshed_tables[0, :7].tolist() == [0, 1, 2, 3, 5, 7, 11]
 
 
 def test_h2o_pruner_keeps_coverage_blocks_with_score_signal():

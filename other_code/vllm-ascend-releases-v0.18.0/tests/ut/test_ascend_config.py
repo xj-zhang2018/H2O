@@ -75,6 +75,7 @@ class TestAscendConfig(TestBase):
                 "decode_budget_fast_ratio": 0.42,
                 "decode_budget_taper_steps": 192,
                 "decode_budget_taper_start_step": 32,
+                "selection_refresh_interval": 8,
                 "debug_log": True,
                 "debug_interval": 16,
             },
@@ -102,6 +103,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_ratio, 0.42)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_steps, 192)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_start_step, 32)
+        self.assertEqual(ascend_config.h2o_config.selection_refresh_interval, 8)
         self.assertTrue(ascend_config.h2o_config.debug_log)
         self.assertEqual(ascend_config.h2o_config.debug_interval, 16)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)

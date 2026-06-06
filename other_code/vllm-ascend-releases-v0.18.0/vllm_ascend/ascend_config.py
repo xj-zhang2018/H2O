@@ -401,6 +401,7 @@ class H2OConfig:
         self.decode_budget_fast_ratio = float(h2o_config.get("decode_budget_fast_ratio", 0.45))
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))
         self.decode_budget_taper_start_step = int(h2o_config.get("decode_budget_taper_start_step", 64))
+        self.selection_refresh_interval = int(h2o_config.get("selection_refresh_interval", 4))
         self.debug_log = bool(h2o_config.get("debug_log", False))
         self.debug_interval = int(h2o_config.get("debug_interval", 1))
         self.debug_sample_requests = int(h2o_config.get("debug_sample_requests", 3))
@@ -422,6 +423,7 @@ class H2OConfig:
                 f"decode_budget_fast_ratio={self.decode_budget_fast_ratio}, "
                 f"decode_budget_taper_steps={self.decode_budget_taper_steps}, "
                 f"decode_budget_taper_start_step={self.decode_budget_taper_start_step}, "
+                f"selection_refresh_interval={self.selection_refresh_interval}, "
                 f"debug_log={self.debug_log}, "
                 f"debug_interval={self.debug_interval}."
             )
@@ -467,6 +469,8 @@ class H2OConfig:
             raise ValueError("h2o_config.decode_budget_taper_steps must be non-negative")
         if self.decode_budget_taper_start_step < 0:
             raise ValueError("h2o_config.decode_budget_taper_start_step must be non-negative")
+        if self.selection_refresh_interval <= 0:
+            raise ValueError("h2o_config.selection_refresh_interval must be greater than 0")
         if self.debug_interval <= 0:
             raise ValueError("h2o_config.debug_interval must be greater than 0")
         if self.debug_sample_requests < 0:

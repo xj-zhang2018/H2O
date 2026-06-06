@@ -89,6 +89,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper. Set to `0` to disable tapering. When `max_blocks` is set, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
 | `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
 | `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
+| `selection_refresh_interval` | int | `4` | Number of decode steps between score-guided historical block reselections when the selected-block budget is stable. Set to `1` to recompute every step. Budget or context-length changes still refresh immediately. |
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
@@ -112,6 +113,7 @@ Example:
         "decode_budget_fast_ratio": 0.45,
         "decode_budget_taper_steps": 256,
         "decode_budget_taper_start_step": 64,
+        "selection_refresh_interval": 4,
         "debug_log": False,
         "debug_interval": 50
     }

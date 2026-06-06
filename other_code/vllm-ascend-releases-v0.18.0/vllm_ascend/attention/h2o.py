@@ -37,6 +37,7 @@ class H2OBlockPruner:
         self._scores: dict[Any, list[float]] = {}
         self._last_seq_lens: dict[Any, int] = {}
         self._decode_steps: dict[Any, int] = {}
+        self._selection_cache: dict[Any, tuple[tuple[Any, ...], list[int]]] = {}
         self._debug_step = 0
         self._debug_seen_pruned = False
 
@@ -57,7 +58,7 @@ class H2OBlockPruner:
         if block_size <= 0:
             return block_tables, seq_lens, seq_lens_list
 
-        new_block_tables = torch.zeros_like(block_tables)
+        new_block_tables = torch.empty_like(block_tables)
         new_seq_lens = torch.empty_like(seq_lens)
         changed = False
         debug_log = bool(getattr(config, "debug_log", False))
@@ -396,18 +397,30 @@ class H2OBlockPruner:
         config: Any,
         request_ids: Sequence[Any] | None,
     ) -> list[int]:
+        cache_key = self._selection_cache_key(
+            req_index,
+            valid_blocks,
+            heavy_blocks,
+            recent_blocks,
+            config,
+            request_ids,
+        )
+        cached = self._get_cached_selection(req_index, cache_key, config, request_ids)
+        if cached is not None:
+            return cached
+
         recent_start = max(valid_blocks - recent_blocks, 0)
         recent = list(range(recent_start, valid_blocks))
         heavy_candidate_end = recent_start
         if heavy_blocks <= 0 or heavy_candidate_end <= 0:
-            return recent
+            return self._cache_selection(req_index, cache_key, recent, request_ids)
 
         sink_blocks = min(getattr(config, "sink_blocks", 1), heavy_blocks, heavy_candidate_end)
         sink = list(range(sink_blocks))
         remaining_heavy_blocks = heavy_blocks - len(sink)
         heavy_candidate_start = sink_blocks
         if remaining_heavy_blocks <= 0 or heavy_candidate_start >= heavy_candidate_end:
-            return sink + recent
+            return self._cache_selection(req_index, cache_key, sink + recent, request_ids)
 
         scores = self._get_scores(req_index, seq_len, valid_blocks, request_ids)
         has_score_signal = scores is not None and any(
@@ -459,13 +472,75 @@ class H2OBlockPruner:
                 reserved,
             )
             reserved.update(coverage)
-            ranked_candidates = [
-                index for index in range(heavy_candidate_start, heavy_candidate_end) if index not in reserved
-            ]
-            ranked = sorted(ranked_candidates, key=lambda index: (-scores[index], index))
             score_blocks = max(heavy_blocks - len(reserved), 0)
-            heavy = sorted(reserved | set(ranked[:score_blocks]))
-        return heavy + recent
+            if score_blocks > 0:
+                ranked_candidates = [
+                    index for index in range(heavy_candidate_start, heavy_candidate_end) if index not in reserved
+                ]
+                ranked = sorted(ranked_candidates, key=lambda index: (-scores[index], index))
+                reserved.update(ranked[:score_blocks])
+            heavy = sorted(reserved)
+        return self._cache_selection(req_index, cache_key, heavy + recent, request_ids)
+
+    def _selection_cache_key(
+        self,
+        req_index: int,
+        valid_blocks: int,
+        heavy_blocks: int,
+        recent_blocks: int,
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> tuple[Any, ...] | None:
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is None:
+            return None
+        return (
+            valid_blocks,
+            heavy_blocks,
+            recent_blocks,
+            getattr(config, "sink_blocks", 1),
+            getattr(config, "anchor_ratio", 0.25),
+            getattr(config, "score_explore_ratio", 0.0),
+            getattr(config, "score_coverage_ratio", 0.0),
+        )
+
+    def _get_cached_selection(
+        self,
+        req_index: int,
+        cache_key: tuple[Any, ...] | None,
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> list[int] | None:
+        if cache_key is None:
+            return None
+        refresh_interval = getattr(config, "selection_refresh_interval", 1)
+        if refresh_interval <= 1:
+            return None
+        decode_step = self._get_decode_step(req_index, request_ids)
+        if decode_step % refresh_interval == 0:
+            return None
+        request_id = self._get_request_id(req_index, request_ids)
+        cached = self._selection_cache.get(request_id)
+        if cached is None:
+            return None
+        cached_key, cached_selection = cached
+        if cached_key != cache_key:
+            return None
+        return list(cached_selection)
+
+    def _cache_selection(
+        self,
+        req_index: int,
+        cache_key: tuple[Any, ...] | None,
+        selected: list[int],
+        request_ids: Sequence[Any] | None,
+    ) -> list[int]:
+        if cache_key is None:
+            return selected
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is not None:
+            self._selection_cache[request_id] = (cache_key, list(selected))
+        return selected
 
     @staticmethod
     def _score_guided_anchor_blocks(start: int, end: int, count: int, scores: Sequence[float]) -> list[int]:
@@ -615,6 +690,7 @@ class H2OBlockPruner:
         if last_seq_len is not None and seq_len < last_seq_len:
             self._scores.pop(request_id, None)
             self._decode_steps.pop(request_id, None)
+            self._selection_cache.pop(request_id, None)
 
         scores = self._scores.setdefault(request_id, [])
         if len(scores) < valid_blocks:
