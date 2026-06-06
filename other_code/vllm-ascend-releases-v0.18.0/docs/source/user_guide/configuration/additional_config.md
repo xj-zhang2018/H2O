@@ -81,7 +81,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `adaptive_budget` | bool | `True` | When fixed block budgets are used, raise very small long-context budgets to `adaptive_min_keep_ratio`; when `max_blocks` is also set, `adaptive_precision_ratio` can further lift the selected-block target. |
 | `adaptive_min_keep_ratio` | float | `0.1` | Minimum selected-block ratio for fixed `heavy_blocks`/`recent_blocks` budgets. Set to `0` to disable this minimum-ratio lift. |
 | `adaptive_precision_ratio` | float | `0.6` | With fixed block budgets and `max_blocks`, lift the selected-block target to this ratio when the base cap would over-prune medium-long contexts. Set to `0` to make `max_blocks` a strict hard cap. |
-| `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. If the current context has no more blocks than this value, H2O keeps the full context and skips Python-side pruning to protect accuracy and avoid overhead on medium contexts. When `max_blocks` and `adaptive_precision_ratio` are active, compact block-table metadata is padded to this width so decode graph shape stays stable while the effective selected-block budget tapers down through `seq_lens`. Set to `None` to allow the ratio-based lift without this full-context guard or static metadata padding. |
+| `adaptive_precision_max_blocks` | int | `96` | Upper bound for the `adaptive_precision_ratio` lift. If the current context has no more blocks than this value, H2O keeps the full context and skips Python-side pruning to protect accuracy and avoid overhead on medium contexts. When `max_blocks` and `adaptive_precision_ratio` are active, compact block-table metadata is padded to this width until an explicit `decode_budget_fast_blocks` target is reached. Set to `None` to allow the ratio-based lift without this full-context guard or static metadata padding. |
 | `sink_blocks` | int | `1` | Number of initial blocks reserved from the heavy budget for system prompts and attention sinks. |
 | `anchor_ratio` | float | `0.25` | Fraction of the remaining heavy budget reserved for score-guided historical anchor blocks when score signal exists. Cold starts use the whole remaining heavy budget as evenly spaced anchors. |
 | `score_explore_ratio` | float | `0.2` | Fraction of the remaining heavy budget reserved for rotating historical exploration when score signal exists. This reduces retained-block score lock-in without increasing the selected-block count. |
@@ -89,7 +89,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `min_prune_ratio` | float | `0.0` | Minimum batch-level pruned-block ratio required before compact block-table metadata is built. Set this above `0` to keep original metadata when the planned selected budget would not save enough attention work to offset Python/NPU metadata overhead; the guard runs before expensive block selection. |
 | `history_cluster_size` | int | `1` | Number of adjacent historical blocks to prefer around each selected historical anchor. Values greater than `1` improve local context continuity for accuracy-sensitive long prompts without increasing the selected-block budget. |
 | `decode_full_attention_steps` | int | `0` | Number of initial decode metadata builds per request that keep the original full context before H2O pruning starts. This can reduce TTFT impact and protect early-token quality for long prompts. |
-| `decode_budget_fast_blocks` | int | `None` | Optional explicit selected-block target after the decode budget taper. When set, it takes precedence over `decode_budget_fast_ratio` so long-running decode can converge to a predictable acceleration-oriented block count. |
+| `decode_budget_fast_blocks` | int | `None` | Optional explicit selected-block target after the decode budget taper. When set, it takes precedence over `decode_budget_fast_ratio` so long-running decode can converge to a predictable acceleration-oriented block count. Once the selected budget reaches this target, compact metadata also uses this width instead of the precision padding width. |
 | `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper when `decode_budget_fast_blocks` is unset. Set to `0` to disable ratio-based tapering. When `max_blocks` is set, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
 | `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
 | `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
@@ -130,7 +130,7 @@ Example:
 }
 ```
 
-For 10k input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use `min_prune_ratio=0.30` with a short taper so early decode steps keep original metadata cheaply until H2O can prune enough blocks to offset Python/NPU metadata overhead:
+For 10k input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the strict 32-block profile below when the priority is latency: it keeps the first decode metadata build full to avoid increasing TTFT, then disables the precision lift so later decode steps use a 32-wide compact block table instead of staying padded to 64 or more blocks.
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -141,7 +141,7 @@ vllm serve /path/to/model \
   --max-model-len 12288 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":48,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.80,"adaptive_precision_max_blocks":64,"min_prune_ratio":0.30,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.30,"score_explore_ratio":0.20,"score_coverage_ratio":0.45,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.0,"decode_budget_taper_steps":64,"decode_budget_taper_start_step":0,"selection_refresh_interval":16,"score_update_on_cache_hit":false,"debug_log":false}}'
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":16,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.30,"score_explore_ratio":0.15,"score_coverage_ratio":0.35,"decode_full_attention_steps":1,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.0,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":32,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

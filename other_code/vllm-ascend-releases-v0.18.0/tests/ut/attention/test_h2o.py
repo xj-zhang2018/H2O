@@ -592,10 +592,9 @@ def test_h2o_pruner_tapers_decode_budget_to_explicit_fast_blocks():
         request_ids=["req-0"],
     )
 
-    assert new_tables.shape == (1, 64)
+    assert new_tables.shape == (1, 32)
     assert new_tables[0, :4].tolist() == [0, 3, 7, 11]
     assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
-    assert new_tables[0, 32:].tolist() == [0] * 32
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
 
@@ -668,6 +667,53 @@ def test_h2o_pruner_skips_low_savings_taper_before_selection():
     assert "req-0" not in pruner._selection_cache
 
 
+def test_h2o_pruner_strict_acceleration_profile_skips_first_then_prunes_fast_width():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=16,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.0,
+        adaptive_precision_max_blocks=None,
+        min_prune_ratio=0.50,
+        decode_full_attention_steps=1,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.0,
+        decode_budget_taper_steps=0,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=32,
+    )
+    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([80 * 128], dtype=torch.int32)
+
+    first_tables, first_lens, first_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert first_tables is block_tables
+    assert first_lens is seq_lens
+    assert first_lens_list == [80 * 128]
+    assert pruner._decode_steps["req-0"] == 1
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables.shape == (1, 32)
+    assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
+    assert new_lens.tolist() == [32 * 128]
+    assert new_lens_list == [32 * 128]
+
+
 def test_h2o_pruner_prunes_once_taper_has_enough_savings():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
@@ -696,9 +742,8 @@ def test_h2o_pruner_prunes_once_taper_has_enough_savings():
         request_ids=["req-0"],
     )
 
-    assert new_tables.shape == (1, 64)
+    assert new_tables.shape == (1, 32)
     assert new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
-    assert new_tables[0, 32:].tolist() == [0] * 32
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
 
@@ -741,7 +786,7 @@ def test_h2o_pruner_reuses_compact_metadata_indices_for_cached_selection():
     )
 
     assert pruner._compact_metadata_cache[1] is cached_indices
-    assert new_tables.shape == (1, 64)
+    assert new_tables.shape == (1, 32)
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
 
