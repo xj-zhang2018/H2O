@@ -55,6 +55,7 @@ class H2OBlockPruner:
             resolved_seq_lens = [] if seq_lens is None else [int(x) for x in seq_lens.tolist()]
         else:
             resolved_seq_lens = [int(x) for x in seq_lens_list]
+        original_seq_lens = list(resolved_seq_lens)
 
         if block_tables is None or seq_lens is None:
             return block_tables, seq_lens, resolved_seq_lens
@@ -74,30 +75,23 @@ class H2OBlockPruner:
             self._advance_warmup_decode_steps(resolved_seq_lens, valid_block_counts, config, request_ids)
             return block_tables, seq_lens, resolved_seq_lens
 
-        new_block_tables = torch.empty_like(block_tables)
-        new_seq_lens = torch.empty_like(seq_lens)
         changed = False
         debug_log = bool(getattr(config, "debug_log", False))
         total_original_blocks = 0
         total_kept_blocks = 0
         sample_requests: list[str] = []
+        selected_block_rows: list[list[int]] = []
+        score_updates: list[tuple[int, int, int, Sequence[int] | None, bool]] = []
 
         for req_index, seq_len in enumerate(resolved_seq_lens):
             if seq_len <= 0:
-                new_block_tables[req_index] = block_tables[req_index]
-                new_seq_lens[req_index] = 0
+                selected_block_rows.append([0])
                 continue
 
             valid_blocks = valid_block_counts[req_index]
             total_original_blocks += valid_blocks
             if seq_len < config.min_seq_len:
-                self._copy_original_row(
-                    new_block_tables,
-                    block_tables,
-                    new_seq_lens,
-                    req_index,
-                    seq_len,
-                )
+                selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
                 if debug_log:
                     self._append_debug_sample(
@@ -113,15 +107,9 @@ class H2OBlockPruner:
                     )
                 continue
             if self._should_keep_full_decode_step(req_index, config, request_ids):
-                self._copy_original_row(
-                    new_block_tables,
-                    block_tables,
-                    new_seq_lens,
-                    req_index,
-                    seq_len,
-                )
+                selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
-                self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+                score_updates.append((req_index, seq_len, valid_blocks, None, True))
                 if debug_log:
                     self._append_debug_sample(
                         sample_requests,
@@ -136,13 +124,7 @@ class H2OBlockPruner:
                     )
                 continue
             if self._should_keep_full_context(valid_blocks, config):
-                self._copy_original_row(
-                    new_block_tables,
-                    block_tables,
-                    new_seq_lens,
-                    req_index,
-                    seq_len,
-                )
+                selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
                 if debug_log:
                     self._append_debug_sample(
@@ -173,15 +155,9 @@ class H2OBlockPruner:
             )
 
             if heavy_blocks + recent_blocks >= valid_blocks:
-                self._copy_original_row(
-                    new_block_tables,
-                    block_tables,
-                    new_seq_lens,
-                    req_index,
-                    seq_len,
-                )
+                selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
-                self._update_scores(req_index, seq_len, valid_blocks, range(valid_blocks), config, request_ids)
+                score_updates.append((req_index, seq_len, valid_blocks, range(valid_blocks), False))
                 if debug_log:
                     self._append_debug_sample(
                         sample_requests,
@@ -211,19 +187,12 @@ class H2OBlockPruner:
                 selected.append(valid_blocks - 1)
             selected = sorted(set(selected))
 
-            selected_tensor = torch.tensor(selected, dtype=torch.long, device=block_tables.device)
-            selected_blocks = block_tables[req_index].index_select(0, selected_tensor)
-            new_block_tables[req_index, : selected_blocks.shape[0]] = selected_blocks
-
             compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
-            new_seq_lens[req_index] = compact_len
+            selected_block_rows.append(selected)
             resolved_seq_lens[req_index] = compact_len
             total_kept_blocks += len(selected)
             changed = True
-            if cache_hit and not getattr(config, "score_update_on_cache_hit", False):
-                self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
-            else:
-                self._update_scores(req_index, seq_len, valid_blocks, selected, config, request_ids)
+            score_updates.append((req_index, seq_len, valid_blocks, selected, cache_hit))
             if debug_log:
                 self._append_debug_sample(
                     sample_requests,
@@ -249,7 +218,18 @@ class H2OBlockPruner:
             )
         if not changed:
             return block_tables, seq_lens, resolved_seq_lens
-        return new_block_tables, new_seq_lens, resolved_seq_lens
+        if not self._has_enough_pruning_savings(total_original_blocks, total_kept_blocks, config):
+            self._touch_decode_steps_for_skipped_pruning(score_updates, request_ids)
+            if debug_log:
+                logger.info(
+                    "[H2O] skipped compact metadata because prune ratio %.4f is below min_prune_ratio %.4f",
+                    self._prune_ratio(total_original_blocks, total_kept_blocks),
+                    getattr(config, "min_prune_ratio", 0.0),
+                )
+            return block_tables, seq_lens, original_seq_lens
+
+        self._apply_score_updates(score_updates, config, request_ids)
+        return self._build_compact_metadata(block_tables, seq_lens, selected_block_rows, resolved_seq_lens)
 
     def _can_keep_original_metadata(
         self,
@@ -286,6 +266,68 @@ class H2OBlockPruner:
                 continue
             if self._should_keep_full_decode_step(req_index, config, request_ids):
                 self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+
+    def _apply_score_updates(
+        self,
+        score_updates: Sequence[tuple[int, int, int, Sequence[int] | None, bool]],
+        config: Any,
+        request_ids: Sequence[Any] | None,
+    ) -> None:
+        for req_index, seq_len, valid_blocks, selected, cache_hit in score_updates:
+            if selected is None or (cache_hit and not getattr(config, "score_update_on_cache_hit", False)):
+                self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+            else:
+                self._update_scores(req_index, seq_len, valid_blocks, selected, config, request_ids)
+
+    def _touch_decode_steps_for_skipped_pruning(
+        self,
+        score_updates: Sequence[tuple[int, int, int, Sequence[int] | None, bool]],
+        request_ids: Sequence[Any] | None,
+    ) -> None:
+        for req_index, seq_len, valid_blocks, _, _ in score_updates:
+            self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+
+    @staticmethod
+    def _build_compact_metadata(
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        selected_block_rows: Sequence[Sequence[int]],
+        compact_seq_lens: Sequence[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        max_selected_blocks = max((len(row) for row in selected_block_rows), default=1)
+        max_selected_blocks = max(max_selected_blocks, 1)
+        gather_rows = []
+        for selected in selected_block_rows:
+            row = list(selected) or [0]
+            if len(row) < max_selected_blocks:
+                row = row + [0] * (max_selected_blocks - len(row))
+            gather_rows.append(row)
+
+        gather_indices = torch.tensor(
+            gather_rows,
+            dtype=torch.long,
+            device=block_tables.device,
+        )
+        new_block_tables = block_tables.gather(1, gather_indices)
+        new_seq_lens = torch.tensor(
+            [int(seq_len) for seq_len in compact_seq_lens],
+            dtype=seq_lens.dtype,
+            device=seq_lens.device,
+        )
+        return new_block_tables, new_seq_lens, [int(seq_len) for seq_len in compact_seq_lens]
+
+    @staticmethod
+    def _has_enough_pruning_savings(total_original_blocks: int, total_kept_blocks: int, config: Any) -> bool:
+        min_prune_ratio = getattr(config, "min_prune_ratio", 0.0)
+        if min_prune_ratio <= 0:
+            return True
+        return H2OBlockPruner._prune_ratio(total_original_blocks, total_kept_blocks) >= min_prune_ratio
+
+    @staticmethod
+    def _prune_ratio(total_original_blocks: int, total_kept_blocks: int) -> float:
+        if total_original_blocks <= 0:
+            return 0.0
+        return max(total_original_blocks - total_kept_blocks, 0) / total_original_blocks
 
     def _log_debug_summary(
         self,
@@ -346,17 +388,6 @@ class H2OBlockPruner:
             f"req={request_id} len={original_len}->{compact_len} "
             f"blocks={original_blocks}->{kept_blocks} reason={reason}"
         )
-
-    @staticmethod
-    def _copy_original_row(
-        new_block_tables: torch.Tensor,
-        block_tables: torch.Tensor,
-        new_seq_lens: torch.Tensor,
-        req_index: int,
-        seq_len: int,
-    ) -> None:
-        new_block_tables[req_index] = block_tables[req_index]
-        new_seq_lens[req_index] = seq_len
 
     @staticmethod
     def _resolve_budgets(

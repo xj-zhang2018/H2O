@@ -23,6 +23,7 @@ class H2OConfigStub:
     anchor_ratio: float = 0.25
     score_explore_ratio: float = 0.2
     score_coverage_ratio: float = 0.35
+    min_prune_ratio: float = 0.0
     decode_full_attention_steps: int = 0
     decode_budget_fast_ratio: float = 0.45
     decode_budget_taper_steps: int = 256
@@ -109,6 +110,61 @@ def test_h2o_pruner_reuses_existing_seq_lens_list():
     assert new_tables[0, :3].tolist() == [10, 13, 14]
     assert new_lens.tolist() == [3 * 128]
     assert new_lens_list == [3 * 128]
+
+
+def test_h2o_pruner_compacts_batch_with_single_gather_width():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=1,
+        recent_blocks=1,
+        adaptive_budget=False,
+    )
+    block_tables = torch.tensor(
+        [
+            [10, 11, 12, 13, 14, 0],
+            [20, 21, 22, 23, 24, 0],
+        ],
+        dtype=torch.int32,
+    )
+    seq_lens = torch.tensor([5 * 128, 5 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0", "req-1"],
+    )
+
+    assert new_tables.shape == (2, 2)
+    assert new_tables.tolist() == [[10, 14], [20, 24]]
+    assert new_lens.tolist() == [2 * 128, 2 * 128]
+    assert new_lens_list == [2 * 128, 2 * 128]
+
+
+def test_h2o_pruner_skips_compaction_when_prune_ratio_is_too_small():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=3,
+        recent_blocks=1,
+        adaptive_budget=False,
+        min_prune_ratio=0.5,
+    )
+    block_tables = torch.tensor([[60, 61, 62, 63, 64, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables is block_tables
+    assert new_lens is seq_lens
+    assert new_lens_list == [5 * 128]
+    assert pruner._decode_steps["req-0"] == 1
 
 
 def test_h2o_pruner_keeps_full_context_for_decode_warmup_steps():

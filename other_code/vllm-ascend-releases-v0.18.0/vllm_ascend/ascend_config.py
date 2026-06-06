@@ -398,6 +398,7 @@ class H2OConfig:
         self.anchor_ratio = float(h2o_config.get("anchor_ratio", 0.25))
         self.score_explore_ratio = float(h2o_config.get("score_explore_ratio", 0.2))
         self.score_coverage_ratio = float(h2o_config.get("score_coverage_ratio", 0.35))
+        self.min_prune_ratio = float(h2o_config.get("min_prune_ratio", 0.0))
         self.decode_full_attention_steps = int(h2o_config.get("decode_full_attention_steps", 0))
         self.decode_budget_fast_ratio = float(h2o_config.get("decode_budget_fast_ratio", 0.45))
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))
@@ -422,6 +423,7 @@ class H2OConfig:
                 f"sink_blocks={self.sink_blocks}, anchor_ratio={self.anchor_ratio}, "
                 f"score_explore_ratio={self.score_explore_ratio}, "
                 f"score_coverage_ratio={self.score_coverage_ratio}, "
+                f"min_prune_ratio={self.min_prune_ratio}, "
                 f"decode_full_attention_steps={self.decode_full_attention_steps}, "
                 f"decode_budget_fast_ratio={self.decode_budget_fast_ratio}, "
                 f"decode_budget_taper_steps={self.decode_budget_taper_steps}, "
@@ -467,6 +469,8 @@ class H2OConfig:
             raise ValueError("h2o_config.score_explore_ratio must be in the range [0, 1]")
         if not 0 <= self.score_coverage_ratio <= 1.0:
             raise ValueError("h2o_config.score_coverage_ratio must be in the range [0, 1]")
+        if not 0 <= self.min_prune_ratio <= 1.0:
+            raise ValueError("h2o_config.min_prune_ratio must be in the range [0, 1]")
         if self.decode_full_attention_steps < 0:
             raise ValueError("h2o_config.decode_full_attention_steps must be non-negative")
         if not 0 <= self.decode_budget_fast_ratio <= 1.0:
