@@ -590,7 +590,11 @@ class H2OBlockPruner:
         fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
         if fast_blocks is None or fast_ratio <= 0:
             return None
-        return min(max(int(fast_blocks), math.ceil(valid_blocks * fast_ratio), 1), valid_blocks)
+        target_blocks = max(int(fast_blocks), math.ceil(valid_blocks * fast_ratio), 1)
+        fast_max_blocks = getattr(config, "decode_budget_fast_max_blocks", None)
+        if fast_max_blocks is not None:
+            target_blocks = min(target_blocks, int(fast_max_blocks))
+        return min(target_blocks, valid_blocks)
 
     @staticmethod
     def _blocks_from_budget(

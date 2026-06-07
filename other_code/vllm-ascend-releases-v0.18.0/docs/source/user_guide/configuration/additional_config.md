@@ -92,6 +92,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `decode_full_attention_steps` | int | `1` | Number of initial decode metadata builds per request that keep the original full context before H2O pruning starts. This reduces TTFT impact and protects early-token quality for long prompts while later decode tokens still use H2O pruning. |
 | `decode_budget_fast_blocks` | int | `None` | Optional explicit selected-block target after the decode budget taper. When set with `decode_budget_fast_ratio=0`, it takes precedence so long-running decode can converge to a predictable acceleration-oriented block count. When set with a positive `decode_budget_fast_ratio`, it becomes the short-context floor and the ratio may lift longer contexts above this fixed count. Once the selected budget reaches the fixed target, compact metadata also uses this width instead of the precision padding width. |
 | `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper when `decode_budget_fast_blocks` is unset. When `decode_budget_fast_blocks` is also set, this ratio provides a length-aware minimum so one fixed fast block count does not over-compress longer prompts. Set to `0` to disable ratio-based tapering or lifting. When `max_blocks` is set and `decode_budget_fast_blocks` is unset, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
+| `decode_budget_fast_max_blocks` | int | `None` | Optional upper bound for the length-scaled fast budget. Use this with `decode_budget_fast_blocks` and `decode_budget_fast_ratio` to keep H2O active for arbitrary long prompts without letting the selected block count grow linearly forever. |
 | `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
 | `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
 | `selection_refresh_interval` | int | `4` | Number of decode steps between score-guided historical block reselections when the selected-block budget is stable. Set to `1` to recompute every step. Budget or context-length changes still refresh immediately. |
@@ -132,7 +133,7 @@ Example:
 }
 ```
 
-For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the precision-scaled fast profile below when H2O should remain active for every prompt length: it keeps a 32-block short-context floor, scales longer prompts to at least 50% of their valid KV blocks, keeps stronger sink and coverage budgets for quality, keeps the first two decode metadata builds full to reduce early-token risk, and avoids `max_prune_seq_len` so 20k, 32k, and 100k prompts still use compact H2O metadata.
+For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the capped fast profile below when H2O should remain active for every prompt length: it keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, keeps stronger sink and recent budgets for quality, prunes from the first decode metadata build to avoid TTFT regression, and avoids `max_prune_seq_len` so 20k, 32k, and 100k prompts still use compact H2O metadata.
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -143,7 +144,7 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":16,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.25,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":2,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.50,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":64,"score_update_on_cache_hit":false,"debug_log":false}}'
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

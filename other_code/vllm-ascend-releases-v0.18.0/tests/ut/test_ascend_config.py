@@ -18,7 +18,7 @@ from unittest.mock import patch
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import H2OConfig, clear_ascend_config, get_ascend_config, init_ascend_config
 
 
 class TestAscendConfig(TestBase):
@@ -79,6 +79,7 @@ class TestAscendConfig(TestBase):
                 "history_cluster_size": 2,
                 "decode_budget_fast_blocks": 24,
                 "decode_budget_fast_ratio": 0.42,
+                "decode_budget_fast_max_blocks": 64,
                 "decode_budget_taper_steps": 192,
                 "decode_budget_taper_start_step": 32,
                 "selection_refresh_interval": 8,
@@ -112,6 +113,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 1)
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_blocks, 24)
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_ratio, 0.42)
+        self.assertEqual(ascend_config.h2o_config.decode_budget_fast_max_blocks, 64)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_steps, 192)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_start_step, 32)
         self.assertEqual(ascend_config.h2o_config.selection_refresh_interval, 8)
@@ -122,6 +124,16 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+
+    def test_h2o_config_rejects_fast_max_below_floor(self):
+        with self.assertRaisesRegex(ValueError, "decode_budget_fast_max_blocks"):
+            H2OConfig({
+                "enabled": True,
+                "heavy_blocks": 8,
+                "recent_blocks": 8,
+                "decode_budget_fast_blocks": 32,
+                "decode_budget_fast_max_blocks": 16,
+            })
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")

@@ -29,6 +29,7 @@ class H2OConfigStub:
     decode_full_attention_steps: int = 0
     decode_budget_fast_blocks: int | None = None
     decode_budget_fast_ratio: float = 0.45
+    decode_budget_fast_max_blocks: int | None = None
     decode_budget_taper_steps: int = 256
     decode_budget_taper_start_step: int = 64
     selection_refresh_interval: int = 4
@@ -820,22 +821,23 @@ def test_h2o_pruner_fast_block_floor_scales_for_long_contexts():
     assert long_new_lens_list == [40 * 128]
 
 
-def test_h2o_pruner_precision_scaled_profile_keeps_long_context_active():
+def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
-        heavy_blocks=16,
-        recent_blocks=16,
+        heavy_blocks=24,
+        recent_blocks=24,
         max_blocks=32,
         adaptive_min_keep_ratio=0.0,
         adaptive_precision_ratio=0.0,
         adaptive_precision_max_blocks=None,
-        min_prune_ratio=0.25,
+        min_prune_ratio=0.50,
         decode_full_attention_steps=0,
         decode_budget_fast_blocks=32,
-        decode_budget_fast_ratio=0.50,
+        decode_budget_fast_ratio=0.25,
+        decode_budget_fast_max_blocks=64,
         decode_budget_taper_steps=0,
         decode_budget_taper_start_step=0,
-        selection_refresh_interval=64,
+        selection_refresh_interval=128,
     )
 
     ten_k_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
@@ -848,10 +850,25 @@ def test_h2o_pruner_precision_scaled_profile_keeps_long_context_active():
         request_ids=["ten-k"],
     )
 
-    assert ten_k_new_tables.shape == (1, 40)
-    assert ten_k_new_tables[0, :40].tolist()[-16:] == list(range(64, 80))
-    assert ten_k_new_lens.tolist() == [40 * 128]
-    assert ten_k_new_lens_list == [40 * 128]
+    assert ten_k_new_tables.shape == (1, 32)
+    assert ten_k_new_tables[0, :32].tolist()[-24:] == list(range(56, 80))
+    assert ten_k_new_lens.tolist() == [32 * 128]
+    assert ten_k_new_lens_list == [32 * 128]
+
+    twenty_k_tables = torch.arange(160, dtype=torch.int32).unsqueeze(0)
+    twenty_k_lens = torch.tensor([160 * 128], dtype=torch.int32)
+    twenty_k_new_tables, twenty_k_new_lens, twenty_k_new_lens_list = pruner.apply(
+        block_tables=twenty_k_tables,
+        seq_lens=twenty_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["twenty-k"],
+    )
+
+    assert twenty_k_new_tables.shape == (1, 40)
+    assert twenty_k_new_tables[0, :40].tolist()[-24:] == list(range(136, 160))
+    assert twenty_k_new_lens.tolist() == [40 * 128]
+    assert twenty_k_new_lens_list == [40 * 128]
 
     thirty_k_tables = torch.arange(240, dtype=torch.int32).unsqueeze(0)
     thirty_k_lens = torch.tensor([240 * 128], dtype=torch.int32)
@@ -863,10 +880,25 @@ def test_h2o_pruner_precision_scaled_profile_keeps_long_context_active():
         request_ids=["thirty-k"],
     )
 
-    assert thirty_k_new_tables.shape == (1, 120)
-    assert thirty_k_new_tables[0, :120].tolist()[-16:] == list(range(224, 240))
-    assert thirty_k_new_lens.tolist() == [120 * 128]
-    assert thirty_k_new_lens_list == [120 * 128]
+    assert thirty_k_new_tables.shape == (1, 60)
+    assert thirty_k_new_tables[0, :60].tolist()[-24:] == list(range(216, 240))
+    assert thirty_k_new_lens.tolist() == [60 * 128]
+    assert thirty_k_new_lens_list == [60 * 128]
+
+    hundred_k_tables = torch.arange(782, dtype=torch.int32).unsqueeze(0)
+    hundred_k_lens = torch.tensor([100000], dtype=torch.int32)
+    hundred_k_new_tables, hundred_k_new_lens, hundred_k_new_lens_list = pruner.apply(
+        block_tables=hundred_k_tables,
+        seq_lens=hundred_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["hundred-k"],
+    )
+
+    assert hundred_k_new_tables.shape == (1, 64)
+    assert hundred_k_new_tables[0, :64].tolist()[-24:] == list(range(758, 782))
+    assert hundred_k_new_lens.tolist() == [63 * 128 + 32]
+    assert hundred_k_new_lens_list == [63 * 128 + 32]
 
 
 def test_h2o_pruner_prunes_once_taper_has_enough_savings():
