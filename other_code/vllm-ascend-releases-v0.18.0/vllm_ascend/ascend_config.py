@@ -400,7 +400,7 @@ class H2OConfig:
         self.score_coverage_ratio = float(h2o_config.get("score_coverage_ratio", 0.35))
         self.min_prune_ratio = float(h2o_config.get("min_prune_ratio", 0.0))
         self.history_cluster_size = int(h2o_config.get("history_cluster_size", 1))
-        self.decode_full_attention_steps = int(h2o_config.get("decode_full_attention_steps", 0))
+        self.decode_full_attention_steps = int(h2o_config.get("decode_full_attention_steps", 1))
         self.decode_budget_fast_blocks = h2o_config.get("decode_budget_fast_blocks", None)
         self.decode_budget_fast_ratio = float(h2o_config.get("decode_budget_fast_ratio", 0.45))
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))

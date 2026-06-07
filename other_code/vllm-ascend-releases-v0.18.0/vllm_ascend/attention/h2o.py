@@ -638,7 +638,7 @@ class H2OBlockPruner:
         config: Any,
         request_ids: Sequence[Any] | None,
     ) -> bool:
-        warmup_steps = getattr(config, "decode_full_attention_steps", 0)
+        warmup_steps = getattr(config, "decode_full_attention_steps", 1)
         if warmup_steps <= 0:
             return False
         if self._get_request_id(req_index, request_ids) is None:
