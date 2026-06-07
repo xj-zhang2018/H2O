@@ -42,6 +42,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.h2o_config.enabled)
         self.assertFalse(ascend_config.h2o_config.debug_log)
         self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 1)
+        self.assertIsNone(ascend_config.h2o_config.max_prune_seq_len)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -66,6 +67,7 @@ class TestAscendConfig(TestBase):
                 "enabled": True,
                 "heavy_blocks": 2,
                 "recent_blocks": 6,
+                "max_prune_seq_len": 12288,
                 "adaptive_min_keep_ratio": 0.15,
                 "adaptive_precision_ratio": 0.55,
                 "adaptive_precision_max_blocks": 80,
@@ -96,6 +98,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.h2o_config.enabled)
         self.assertEqual(ascend_config.h2o_config.heavy_blocks, 2)
         self.assertEqual(ascend_config.h2o_config.recent_blocks, 6)
+        self.assertEqual(ascend_config.h2o_config.max_prune_seq_len, 12288)
         self.assertTrue(ascend_config.h2o_config.adaptive_budget)
         self.assertEqual(ascend_config.h2o_config.adaptive_min_keep_ratio, 0.15)
         self.assertEqual(ascend_config.h2o_config.adaptive_precision_ratio, 0.55)

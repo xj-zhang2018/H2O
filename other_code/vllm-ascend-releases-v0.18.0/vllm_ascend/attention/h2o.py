@@ -110,6 +110,23 @@ class H2OBlockPruner:
                         "short",
                     )
                 continue
+            if self._should_skip_for_max_prune_seq_len(seq_len, config):
+                selected_block_rows.append(list(range(valid_blocks)))
+                total_kept_blocks += valid_blocks
+                planned_kept_blocks += valid_blocks
+                if debug_log:
+                    self._append_debug_sample(
+                        sample_requests,
+                        config,
+                        request_ids,
+                        req_index,
+                        seq_len,
+                        seq_len,
+                        valid_blocks,
+                        valid_blocks,
+                        "above-max-prune-seq-len",
+                    )
+                continue
             if self._should_keep_full_decode_step(req_index, config, request_ids):
                 selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
@@ -285,6 +302,8 @@ class H2OBlockPruner:
                 continue
             if seq_len < config.min_seq_len:
                 continue
+            if self._should_skip_for_max_prune_seq_len(seq_len, config):
+                continue
             if H2OBlockPruner._should_keep_full_context(valid_blocks, config):
                 continue
             if self._should_keep_full_decode_step(req_index, config, request_ids):
@@ -301,6 +320,8 @@ class H2OBlockPruner:
     ) -> None:
         for req_index, (seq_len, valid_blocks) in enumerate(zip(seq_lens, valid_block_counts)):
             if seq_len <= 0 or seq_len < config.min_seq_len:
+                continue
+            if self._should_skip_for_max_prune_seq_len(seq_len, config):
                 continue
             if self._should_keep_full_context(valid_blocks, config):
                 continue
@@ -557,6 +578,11 @@ class H2OBlockPruner:
 
         precision_max_blocks = getattr(config, "adaptive_precision_max_blocks", None)
         return precision_max_blocks is not None and valid_blocks <= precision_max_blocks
+
+    @staticmethod
+    def _should_skip_for_max_prune_seq_len(seq_len: int, config: Any) -> bool:
+        max_prune_seq_len = getattr(config, "max_prune_seq_len", None)
+        return max_prune_seq_len is not None and seq_len > int(max_prune_seq_len)
 
     @staticmethod
     def _length_scaled_fast_blocks(valid_blocks: int, config: Any) -> int | None:

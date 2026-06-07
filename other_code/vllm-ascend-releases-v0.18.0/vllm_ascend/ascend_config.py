@@ -389,6 +389,7 @@ class H2OConfig:
         self.recent_blocks = h2o_config.get("recent_blocks", None)
         self.max_blocks = h2o_config.get("max_blocks", None)
         self.min_seq_len = int(h2o_config.get("min_seq_len", 0))
+        self.max_prune_seq_len = h2o_config.get("max_prune_seq_len", None)
         self.score_decay = float(h2o_config.get("score_decay", 1.0))
         self.adaptive_budget = bool(h2o_config.get("adaptive_budget", True))
         self.adaptive_min_keep_ratio = float(h2o_config.get("adaptive_min_keep_ratio", 0.1))
@@ -418,6 +419,7 @@ class H2OConfig:
                 f"heavy_ratio={self.heavy_ratio}, recent_ratio={self.recent_ratio}, "
                 f"heavy_blocks={self.heavy_blocks}, recent_blocks={self.recent_blocks}, "
                 f"max_blocks={self.max_blocks}, min_seq_len={self.min_seq_len}, "
+                f"max_prune_seq_len={self.max_prune_seq_len}, "
                 f"score_decay={self.score_decay}, adaptive_budget={self.adaptive_budget}, "
                 f"adaptive_min_keep_ratio={self.adaptive_min_keep_ratio}, "
                 f"adaptive_precision_ratio={self.adaptive_precision_ratio}, "
@@ -453,6 +455,7 @@ class H2OConfig:
         self._validate_optional_blocks("heavy_blocks", self.heavy_blocks)
         self._validate_optional_blocks("recent_blocks", self.recent_blocks)
         self._validate_optional_blocks("max_blocks", self.max_blocks)
+        self._validate_optional_blocks("max_prune_seq_len", self.max_prune_seq_len)
         self._validate_optional_blocks("adaptive_precision_max_blocks", self.adaptive_precision_max_blocks)
         self._validate_optional_blocks("sink_blocks", self.sink_blocks)
         self._validate_optional_blocks("decode_budget_fast_blocks", self.decode_budget_fast_blocks)
@@ -464,6 +467,8 @@ class H2OConfig:
             raise ValueError("h2o_config.decode_budget_fast_blocks must be greater than 0 when set")
         if self.min_seq_len < 0:
             raise ValueError("h2o_config.min_seq_len must be non-negative")
+        if self.max_prune_seq_len == 0:
+            raise ValueError("h2o_config.max_prune_seq_len must be greater than 0 when set")
         if not 0 < self.score_decay <= 1.0:
             raise ValueError("h2o_config.score_decay must be in the range (0, 1]")
         if not 0 <= self.adaptive_min_keep_ratio <= 1.0:

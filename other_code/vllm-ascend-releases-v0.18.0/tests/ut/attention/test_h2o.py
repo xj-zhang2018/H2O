@@ -14,6 +14,7 @@ class H2OConfigStub:
     recent_blocks: int | None = None
     max_blocks: int | None = None
     min_seq_len: int = 0
+    max_prune_seq_len: int | None = None
     score_decay: float = 1.0
     adaptive_budget: bool = True
     adaptive_min_keep_ratio: float = 0.1
@@ -92,6 +93,33 @@ def test_h2o_pruner_leaves_short_sequences_unchanged():
     assert torch.equal(new_tables, block_tables)
     assert torch.equal(new_lens, seq_lens)
     assert new_lens_list == [256]
+
+
+def test_h2o_pruner_leaves_long_sequences_above_max_prune_len_unchanged():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=1,
+        recent_blocks=1,
+        adaptive_budget=False,
+        max_prune_seq_len=4 * 128,
+    )
+    block_tables = torch.tensor([[60, 61, 62, 63, 64, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables is block_tables
+    assert new_lens is seq_lens
+    assert new_lens_list == [5 * 128]
+    assert pruner._decode_steps == {}
+    assert pruner._scores == {}
+    assert pruner._selection_cache == {}
 
 
 def test_h2o_pruner_reuses_existing_seq_lens_list():
