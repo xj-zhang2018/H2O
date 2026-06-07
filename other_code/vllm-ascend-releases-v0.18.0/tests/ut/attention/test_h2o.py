@@ -831,7 +831,7 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         adaptive_precision_ratio=0.0,
         adaptive_precision_max_blocks=None,
         min_prune_ratio=0.50,
-        decode_full_attention_steps=0,
+        decode_full_attention_steps=1,
         decode_budget_fast_blocks=32,
         decode_budget_fast_ratio=0.25,
         decode_budget_fast_max_blocks=64,
@@ -842,6 +842,13 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
 
     ten_k_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
     ten_k_lens = torch.tensor([80 * 128], dtype=torch.int32)
+    ten_k_first_tables, ten_k_first_lens, ten_k_first_lens_list = pruner.apply(
+        block_tables=ten_k_tables,
+        seq_lens=ten_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["ten-k"],
+    )
     ten_k_new_tables, ten_k_new_lens, ten_k_new_lens_list = pruner.apply(
         block_tables=ten_k_tables,
         seq_lens=ten_k_lens,
@@ -850,6 +857,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["ten-k"],
     )
 
+    assert ten_k_first_tables is ten_k_tables
+    assert ten_k_first_lens is ten_k_lens
+    assert ten_k_first_lens_list == [80 * 128]
     assert ten_k_new_tables.shape == (1, 64)
     assert ten_k_new_tables[0, :32].tolist()[-24:] == list(range(56, 80))
     assert ten_k_new_tables[0, 32:].tolist() == [0] * 32
@@ -858,6 +868,13 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
 
     twenty_k_tables = torch.arange(160, dtype=torch.int32).unsqueeze(0)
     twenty_k_lens = torch.tensor([160 * 128], dtype=torch.int32)
+    twenty_k_first_tables, twenty_k_first_lens, twenty_k_first_lens_list = pruner.apply(
+        block_tables=twenty_k_tables,
+        seq_lens=twenty_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["twenty-k"],
+    )
     twenty_k_new_tables, twenty_k_new_lens, twenty_k_new_lens_list = pruner.apply(
         block_tables=twenty_k_tables,
         seq_lens=twenty_k_lens,
@@ -866,6 +883,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["twenty-k"],
     )
 
+    assert twenty_k_first_tables is twenty_k_tables
+    assert twenty_k_first_lens is twenty_k_lens
+    assert twenty_k_first_lens_list == [160 * 128]
     assert twenty_k_new_tables.shape == (1, 64)
     assert twenty_k_new_tables[0, :40].tolist()[-24:] == list(range(136, 160))
     assert twenty_k_new_tables[0, 40:].tolist() == [0] * 24
@@ -874,6 +894,13 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
 
     thirty_k_tables = torch.arange(240, dtype=torch.int32).unsqueeze(0)
     thirty_k_lens = torch.tensor([240 * 128], dtype=torch.int32)
+    thirty_k_first_tables, thirty_k_first_lens, thirty_k_first_lens_list = pruner.apply(
+        block_tables=thirty_k_tables,
+        seq_lens=thirty_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["thirty-k"],
+    )
     thirty_k_new_tables, thirty_k_new_lens, thirty_k_new_lens_list = pruner.apply(
         block_tables=thirty_k_tables,
         seq_lens=thirty_k_lens,
@@ -882,6 +909,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["thirty-k"],
     )
 
+    assert thirty_k_first_tables is thirty_k_tables
+    assert thirty_k_first_lens is thirty_k_lens
+    assert thirty_k_first_lens_list == [240 * 128]
     assert thirty_k_new_tables.shape == (1, 64)
     assert thirty_k_new_tables[0, :60].tolist()[-24:] == list(range(216, 240))
     assert thirty_k_new_tables[0, 60:].tolist() == [0] * 4
@@ -890,6 +920,13 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
 
     hundred_k_tables = torch.arange(782, dtype=torch.int32).unsqueeze(0)
     hundred_k_lens = torch.tensor([100000], dtype=torch.int32)
+    hundred_k_first_tables, hundred_k_first_lens, hundred_k_first_lens_list = pruner.apply(
+        block_tables=hundred_k_tables,
+        seq_lens=hundred_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["hundred-k"],
+    )
     hundred_k_new_tables, hundred_k_new_lens, hundred_k_new_lens_list = pruner.apply(
         block_tables=hundred_k_tables,
         seq_lens=hundred_k_lens,
@@ -898,6 +935,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["hundred-k"],
     )
 
+    assert hundred_k_first_tables is hundred_k_tables
+    assert hundred_k_first_lens is hundred_k_lens
+    assert hundred_k_first_lens_list == [100000]
     assert hundred_k_new_tables.shape == (1, 64)
     assert hundred_k_new_tables[0, :64].tolist()[-24:] == list(range(758, 782))
     assert hundred_k_new_lens.tolist() == [63 * 128 + 32]
