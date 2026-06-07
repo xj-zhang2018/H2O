@@ -239,6 +239,35 @@ def test_h2o_pruner_keeps_full_context_for_decode_warmup_steps():
     assert third_lens_list == [2 * 128]
 
 
+def test_h2o_pruner_keeps_full_context_without_request_ids_for_warmup():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=1,
+        recent_blocks=1,
+        adaptive_budget=False,
+        decode_full_attention_steps=1,
+    )
+    block_tables = torch.tensor([[60, 61, 62, 63, 64, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5 * 128], dtype=torch.int32)
+
+    for _ in range(2):
+        new_tables, new_lens, new_lens_list = pruner.apply(
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            block_size=128,
+            config=config,
+            request_ids=None,
+        )
+
+        assert new_tables is block_tables
+        assert new_lens is seq_lens
+        assert new_lens_list == [5 * 128]
+
+    assert pruner._decode_steps == {}
+    assert pruner._scores == {}
+    assert pruner._selection_cache == {}
+
+
 def test_h2o_pruner_always_keeps_current_block():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(heavy_blocks=1, recent_blocks=0)

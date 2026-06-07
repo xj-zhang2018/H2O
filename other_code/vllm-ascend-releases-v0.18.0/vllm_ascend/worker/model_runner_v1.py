@@ -2154,6 +2154,7 @@ class NPUModelRunner(GPUModelRunner):
             positions=self.positions.gpu,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
+            request_ids=list(self.input_batch.req_ids[:num_reqs]),
             prefill_context_parallel_metadata=self.long_seq_metadata,
         )
 

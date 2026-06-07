@@ -641,9 +641,13 @@ class H2OBlockPruner:
         warmup_steps = getattr(config, "decode_full_attention_steps", 1)
         if warmup_steps <= 0:
             return False
-        if self._get_request_id(req_index, request_ids) is None:
-            return False
-        return self._get_decode_step(req_index, request_ids) < warmup_steps
+        request_id = self._get_request_id(req_index, request_ids)
+        if request_id is None:
+            # Warmup/cache state is keyed by request id. If a caller cannot
+            # provide stable ids, keep full metadata instead of repeatedly
+            # paying stateless H2O selection cost on long decode requests.
+            return True
+        return self._decode_steps.get(request_id, 0) < warmup_steps
 
     def _select_blocks(
         self,
