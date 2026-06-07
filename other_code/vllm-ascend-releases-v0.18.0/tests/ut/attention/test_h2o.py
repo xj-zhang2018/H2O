@@ -25,6 +25,7 @@ class H2OConfigStub:
     score_explore_ratio: float = 0.2
     score_coverage_ratio: float = 0.35
     min_prune_ratio: float = 0.0
+    min_metadata_prune_ratio: float = 0.0
     history_cluster_size: int = 1
     decode_full_attention_steps: int = 0
     decode_budget_fast_blocks: int | None = None
@@ -913,6 +914,56 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
     assert hundred_k_new_lens_list == [63 * 128 + 32]
 
 
+def test_h2o_pruner_skips_mixed_warmup_batch_that_would_force_full_metadata_width():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=24,
+        recent_blocks=24,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.0,
+        adaptive_precision_max_blocks=None,
+        min_prune_ratio=0.50,
+        min_metadata_prune_ratio=0.05,
+        decode_full_attention_steps=1,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.25,
+        decode_budget_fast_max_blocks=64,
+        decode_budget_taper_steps=0,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=128,
+    )
+    block_tables = torch.arange(4 * 160, dtype=torch.int32).reshape(4, 160)
+    seq_lens = torch.tensor([160 * 128] * 4, dtype=torch.int32)
+    request_ids = ["warming", "hot-1", "hot-2", "hot-3"]
+    pruner._decode_steps.update({"hot-1": 1, "hot-2": 1, "hot-3": 1})
+
+    warm_tables, warm_lens, warm_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=request_ids,
+    )
+
+    assert warm_tables is block_tables
+    assert warm_lens is seq_lens
+    assert warm_lens_list == [160 * 128] * 4
+    assert pruner._decode_steps["warming"] == 1
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=request_ids,
+    )
+
+    assert new_tables.shape == (4, 64)
+    assert new_lens.tolist() == [40 * 128] * 4
+    assert new_lens_list == [40 * 128] * 4
+
+
 def test_h2o_pruner_prunes_once_taper_has_enough_savings():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
@@ -988,6 +1039,46 @@ def test_h2o_pruner_reuses_compact_metadata_indices_for_cached_selection():
     assert new_tables.shape == (1, 32)
     assert new_lens.tolist() == [32 * 128]
     assert new_lens_list == [32 * 128]
+
+
+def test_h2o_pruner_reuses_compact_block_tables_for_cached_selection():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=48,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.8,
+        adaptive_precision_max_blocks=64,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.0,
+        decode_budget_taper_steps=128,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=16,
+    )
+    pruner._decode_steps["req-0"] = 128
+    block_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    first_lens = torch.tensor([79 * 128 + 1], dtype=torch.int32)
+    second_lens = torch.tensor([79 * 128 + 2], dtype=torch.int32)
+
+    first_tables, first_compact_lens, _ = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=first_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+    second_tables, second_compact_lens, _ = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=second_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert second_tables is first_tables
+    assert first_compact_lens.tolist() == [31 * 128 + 1]
+    assert second_compact_lens.tolist() == [31 * 128 + 2]
 
 
 def test_h2o_pruner_recent_blocks_build_stronger_score_proxy():

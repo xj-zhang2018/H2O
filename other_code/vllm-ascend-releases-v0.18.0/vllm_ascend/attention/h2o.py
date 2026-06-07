@@ -39,6 +39,7 @@ class H2OBlockPruner:
         self._decode_steps: dict[Any, int] = {}
         self._selection_cache: dict[Any, tuple[tuple[Any, ...], tuple[int, ...]]] = {}
         self._compact_metadata_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
+        self._compact_block_table_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
         self._debug_step = 0
         self._debug_seen_pruned = False
 
@@ -220,7 +221,23 @@ class H2OBlockPruner:
                     sample_requests,
                 )
             return block_tables, seq_lens, resolved_seq_lens
-        if not self._has_enough_pruning_savings(total_original_blocks, planned_kept_blocks, config):
+        planned_row_lengths = self._planned_selected_row_lengths(
+            selected_block_rows,
+            prune_candidates,
+        )
+        has_budget_savings = self._has_enough_pruning_savings(
+            total_original_blocks,
+            planned_kept_blocks,
+            config,
+        )
+        has_metadata_shape_savings = self._has_enough_metadata_shape_savings(
+            total_original_blocks,
+            planned_row_lengths,
+            valid_block_counts,
+            block_tables.shape[1],
+            config,
+        )
+        if not has_budget_savings or not has_metadata_shape_savings:
             skip_updates = list(score_updates)
             skip_updates.extend(
                 (req_index, seq_len, valid_blocks, None, True)
@@ -229,10 +246,17 @@ class H2OBlockPruner:
             self._touch_decode_steps_for_skipped_pruning(skip_updates, request_ids)
             if debug_log:
                 logger.info(
-                    "[H2O] skipped compact metadata before block selection because planned prune ratio %.4f "
-                    "is below min_prune_ratio %.4f",
+                    "[H2O] skipped compact metadata before block selection because "
+                    "planned prune ratio %.4f or metadata shape prune ratio %.4f "
+                    "is below the configured minimum.",
                     self._prune_ratio(total_original_blocks, planned_kept_blocks),
-                    getattr(config, "min_prune_ratio", 0.0),
+                    self._metadata_shape_prune_ratio(
+                        total_original_blocks,
+                        planned_row_lengths,
+                        valid_block_counts,
+                        block_tables.shape[1],
+                        config,
+                    ),
                 )
                 self._log_debug_summary(
                     config,
@@ -286,7 +310,19 @@ class H2OBlockPruner:
 
         self._apply_score_updates(score_updates, config, request_ids)
         compact_rows = [row if row is not None else (0,) for row in selected_block_rows]
-        return self._build_compact_metadata(block_tables, seq_lens, compact_rows, resolved_seq_lens, config)
+        source_cache_key = self._compact_block_table_source_key(
+            block_tables,
+            valid_block_counts,
+            request_ids,
+        )
+        return self._build_compact_metadata(
+            block_tables,
+            seq_lens,
+            compact_rows,
+            resolved_seq_lens,
+            config,
+            source_cache_key,
+        )
 
     def _can_keep_original_metadata(
         self,
@@ -355,6 +391,7 @@ class H2OBlockPruner:
         selected_block_rows: Sequence[Sequence[int]],
         compact_seq_lens: Sequence[int],
         config: Any,
+        source_cache_key: tuple[Any, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
         max_selected_blocks = max((len(row) for row in selected_block_rows), default=1)
         max_selected_blocks = max(max_selected_blocks, 1)
@@ -383,7 +420,16 @@ class H2OBlockPruner:
                 device=block_tables.device,
             )
             self._compact_metadata_cache = (cache_key, gather_indices)
-        new_block_tables = block_tables.gather(1, gather_indices)
+        block_table_cache_key = None
+        if source_cache_key is not None:
+            block_table_cache_key = (cache_key, source_cache_key)
+        cached_block_tables = self._compact_block_table_cache
+        if cached_block_tables is not None and cached_block_tables[0] == block_table_cache_key:
+            new_block_tables = cached_block_tables[1]
+        else:
+            new_block_tables = block_tables.gather(1, gather_indices)
+            if block_table_cache_key is not None:
+                self._compact_block_table_cache = (block_table_cache_key, new_block_tables)
         compact_seq_lens_list = [int(seq_len) for seq_len in compact_seq_lens]
         new_seq_lens = torch.tensor(
             compact_seq_lens_list,
@@ -419,10 +465,87 @@ class H2OBlockPruner:
         return H2OBlockPruner._prune_ratio(total_original_blocks, total_kept_blocks) >= min_prune_ratio
 
     @staticmethod
+    def _has_enough_metadata_shape_savings(
+        total_original_blocks: int,
+        planned_row_lengths: Sequence[int],
+        valid_block_counts: Sequence[int],
+        block_table_width: int,
+        config: Any,
+    ) -> bool:
+        min_metadata_prune_ratio = getattr(config, "min_metadata_prune_ratio", 0.0)
+        if min_metadata_prune_ratio is None:
+            min_metadata_prune_ratio = 0.0
+        if min_metadata_prune_ratio <= 0:
+            return True
+        if total_original_blocks <= 0:
+            return True
+
+        return (
+            H2OBlockPruner._metadata_shape_prune_ratio(
+                total_original_blocks,
+                planned_row_lengths,
+                valid_block_counts,
+                block_table_width,
+                config,
+            )
+            >= min_metadata_prune_ratio
+        )
+
+    @staticmethod
+    def _metadata_shape_prune_ratio(
+        total_original_blocks: int,
+        planned_row_lengths: Sequence[int],
+        valid_block_counts: Sequence[int],
+        block_table_width: int,
+        config: Any,
+    ) -> float:
+        active_row_lengths = [
+            row_length
+            for row_length, valid_blocks in zip(planned_row_lengths, valid_block_counts)
+            if valid_blocks > 0
+        ]
+        if not active_row_lengths or total_original_blocks <= 0:
+            return 0.0
+
+        metadata_width = H2OBlockPruner._resolve_compact_metadata_width(
+            max(active_row_lengths),
+            block_table_width,
+            config,
+        )
+        padded_metadata_blocks = metadata_width * len(active_row_lengths)
+        return H2OBlockPruner._prune_ratio(total_original_blocks, padded_metadata_blocks)
+
+    @staticmethod
     def _prune_ratio(total_original_blocks: int, total_kept_blocks: int) -> float:
         if total_original_blocks <= 0:
             return 0.0
         return max(total_original_blocks - total_kept_blocks, 0) / total_original_blocks
+
+    @staticmethod
+    def _planned_selected_row_lengths(
+        selected_block_rows: Sequence[Sequence[int] | None],
+        prune_candidates: Sequence[tuple[int, int, int, int, int, int]],
+    ) -> list[int]:
+        row_lengths = [len(row) if row is not None else 1 for row in selected_block_rows]
+        for row_pos, _, _, valid_blocks, heavy_blocks, recent_blocks in prune_candidates:
+            row_lengths[row_pos] = min(valid_blocks, max(heavy_blocks + recent_blocks, 1))
+        return row_lengths
+
+    @staticmethod
+    def _compact_block_table_source_key(
+        block_tables: torch.Tensor,
+        valid_block_counts: Sequence[int],
+        request_ids: Sequence[Any] | None,
+    ) -> tuple[Any, ...]:
+        request_key = tuple(request_ids) if request_ids is not None else None
+        return (
+            str(block_tables.device),
+            str(block_tables.dtype),
+            tuple(block_tables.shape),
+            block_tables.data_ptr(),
+            tuple(valid_block_counts),
+            request_key,
+        )
 
     def _log_debug_summary(
         self,
