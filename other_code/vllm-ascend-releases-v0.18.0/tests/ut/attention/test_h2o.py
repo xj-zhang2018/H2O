@@ -850,8 +850,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["ten-k"],
     )
 
-    assert ten_k_new_tables.shape == (1, 32)
+    assert ten_k_new_tables.shape == (1, 64)
     assert ten_k_new_tables[0, :32].tolist()[-24:] == list(range(56, 80))
+    assert ten_k_new_tables[0, 32:].tolist() == [0] * 32
     assert ten_k_new_lens.tolist() == [32 * 128]
     assert ten_k_new_lens_list == [32 * 128]
 
@@ -865,8 +866,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["twenty-k"],
     )
 
-    assert twenty_k_new_tables.shape == (1, 40)
+    assert twenty_k_new_tables.shape == (1, 64)
     assert twenty_k_new_tables[0, :40].tolist()[-24:] == list(range(136, 160))
+    assert twenty_k_new_tables[0, 40:].tolist() == [0] * 24
     assert twenty_k_new_lens.tolist() == [40 * 128]
     assert twenty_k_new_lens_list == [40 * 128]
 
@@ -880,8 +882,9 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
         request_ids=["thirty-k"],
     )
 
-    assert thirty_k_new_tables.shape == (1, 60)
+    assert thirty_k_new_tables.shape == (1, 64)
     assert thirty_k_new_tables[0, :60].tolist()[-24:] == list(range(216, 240))
+    assert thirty_k_new_tables[0, 60:].tolist() == [0] * 4
     assert thirty_k_new_lens.tolist() == [60 * 128]
     assert thirty_k_new_lens_list == [60 * 128]
 
