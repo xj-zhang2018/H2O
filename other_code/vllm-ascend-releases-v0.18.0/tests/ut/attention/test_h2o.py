@@ -714,6 +714,55 @@ def test_h2o_pruner_strict_acceleration_profile_skips_first_then_prunes_fast_wid
     assert new_lens_list == [32 * 128]
 
 
+def test_h2o_pruner_fast_block_floor_scales_for_long_contexts():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=16,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.0,
+        adaptive_precision_max_blocks=None,
+        min_prune_ratio=0.50,
+        decode_full_attention_steps=0,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.25,
+        decode_budget_taper_steps=0,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=32,
+    )
+
+    short_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    short_lens = torch.tensor([80 * 128], dtype=torch.int32)
+    short_new_tables, short_new_lens, short_new_lens_list = pruner.apply(
+        block_tables=short_tables,
+        seq_lens=short_lens,
+        block_size=128,
+        config=config,
+        request_ids=["short"],
+    )
+
+    assert short_new_tables.shape == (1, 32)
+    assert short_new_tables[0, :32].tolist()[-16:] == list(range(64, 80))
+    assert short_new_lens.tolist() == [32 * 128]
+    assert short_new_lens_list == [32 * 128]
+
+    long_tables = torch.arange(160, dtype=torch.int32).unsqueeze(0)
+    long_lens = torch.tensor([160 * 128], dtype=torch.int32)
+    long_new_tables, long_new_lens, long_new_lens_list = pruner.apply(
+        block_tables=long_tables,
+        seq_lens=long_lens,
+        block_size=128,
+        config=config,
+        request_ids=["long"],
+    )
+
+    assert long_new_tables.shape == (1, 40)
+    assert long_new_tables[0, :40].tolist()[-16:] == list(range(144, 160))
+    assert long_new_lens.tolist() == [40 * 128]
+    assert long_new_lens_list == [40 * 128]
+
+
 def test_h2o_pruner_prunes_once_taper_has_enough_savings():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(

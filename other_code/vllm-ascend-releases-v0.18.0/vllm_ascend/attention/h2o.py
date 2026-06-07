@@ -491,7 +491,14 @@ class H2OBlockPruner:
             precision_blocks = H2OBlockPruner._adaptive_precision_blocks(valid_blocks, config)
             if precision_blocks is not None:
                 min_keep_blocks = max(min_keep_blocks, precision_blocks)
-            elif config.max_blocks is not None and config.adaptive_min_keep_ratio > 0:
+            fast_target_blocks = H2OBlockPruner._length_scaled_fast_blocks(valid_blocks, config)
+            if fast_target_blocks is not None:
+                min_keep_blocks = max(min_keep_blocks, fast_target_blocks)
+            elif (
+                precision_blocks is None
+                and config.max_blocks is not None
+                and config.adaptive_min_keep_ratio > 0
+            ):
                 min_keep_blocks = min(min_keep_blocks, config.max_blocks)
             if min_keep_blocks > heavy_blocks + recent_blocks:
                 heavy_blocks += min_keep_blocks - heavy_blocks - recent_blocks
@@ -506,6 +513,9 @@ class H2OBlockPruner:
         precision_blocks = H2OBlockPruner._adaptive_precision_blocks(valid_blocks, config)
         if precision_blocks is not None:
             block_cap = max(block_cap, precision_blocks)
+        fast_target_blocks = H2OBlockPruner._length_scaled_fast_blocks(valid_blocks, config)
+        if fast_target_blocks is not None:
+            block_cap = max(block_cap, fast_target_blocks)
         return min(block_cap, valid_blocks)
 
     @staticmethod
@@ -549,6 +559,14 @@ class H2OBlockPruner:
         return precision_max_blocks is not None and valid_blocks <= precision_max_blocks
 
     @staticmethod
+    def _length_scaled_fast_blocks(valid_blocks: int, config: Any) -> int | None:
+        fast_blocks = getattr(config, "decode_budget_fast_blocks", None)
+        fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
+        if fast_blocks is None or fast_ratio <= 0:
+            return None
+        return min(max(int(fast_blocks), math.ceil(valid_blocks * fast_ratio), 1), valid_blocks)
+
+    @staticmethod
     def _blocks_from_budget(
         seq_len: int,
         valid_blocks: int,
@@ -589,13 +607,15 @@ class H2OBlockPruner:
         if decode_step <= 0:
             return heavy_blocks, recent_blocks
 
-        if fast_blocks is None:
-            fast_target = math.ceil(valid_blocks * fast_ratio)
-        else:
-            fast_target = fast_blocks
-        max_blocks = getattr(config, "max_blocks", None)
-        if max_blocks is not None:
-            fast_target = min(fast_target, max_blocks)
+        fast_target = self._length_scaled_fast_blocks(valid_blocks, config)
+        if fast_target is None:
+            if fast_blocks is None:
+                fast_target = math.ceil(valid_blocks * fast_ratio)
+            else:
+                fast_target = fast_blocks
+            max_blocks = getattr(config, "max_blocks", None)
+            if max_blocks is not None:
+                fast_target = min(fast_target, max_blocks)
 
         min_heavy_blocks = min(heavy_blocks, getattr(config, "sink_blocks", 1))
         min_total = min(valid_blocks, recent_blocks + min_heavy_blocks)
