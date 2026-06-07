@@ -133,7 +133,7 @@ Example:
 }
 ```
 
-For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the capped fast profile below when H2O should remain active for every prompt length: it keeps the first decode metadata build in full attention to avoid moving H2O selection and compact-table construction into TTFT, then starts compact H2O metadata on the next decode step; it also keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, pads compact block-table metadata to a stable 64-column width to avoid length-specific decode graph updates, keeps stronger sink and recent budgets for quality, and avoids `max_prune_seq_len` so 20k, 32k, and max-model-len-permitted 100k prompts still use compact H2O metadata.
+For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the capped fast profile below when H2O should remain active for every prompt length: it keeps the first 8 decode metadata builds in full attention to avoid moving H2O selection and compact-table construction into TTFT, then starts compact H2O metadata; it also keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, pads compact block-table metadata to a stable 64-column width to avoid length-specific decode graph updates, keeps stronger sink and recent budgets for quality, and avoids `max_prune_seq_len` so 20k, 32k, and max-model-len-permitted 100k prompts still use compact H2O metadata.
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -144,7 +144,7 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":1,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false}}'
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":8,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

@@ -271,6 +271,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        track_h2o_request_state: bool = True,
     ) -> AscendMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -326,13 +327,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )
-        self._maybe_apply_h2o(attn_metadata, common_attn_metadata)
+        self._maybe_apply_h2o(
+            attn_metadata,
+            common_attn_metadata,
+            track_request_state=track_h2o_request_state,
+        )
         return attn_metadata
 
     def _maybe_apply_h2o(
         self,
         attn_metadata: AscendMetadata,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        track_request_state: bool = True,
     ) -> None:
         if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
             return
@@ -362,12 +368,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             return
 
         block_size = getattr(self.kv_cache_spec, "block_size", self.vllm_config.cache_config.block_size)
+        request_ids = common_attn_metadata.request_ids if track_request_state else None
         block_tables, seq_lens, seq_lens_list = self.h2o_pruner.apply(
             block_tables=attn_metadata.block_tables,
             seq_lens=attn_metadata.seq_lens,
             block_size=block_size,
             config=h2o_config,
-            request_ids=common_attn_metadata.request_ids,
+            request_ids=request_ids,
             seq_lens_list=attn_metadata.seq_lens_list,
         )
         attn_metadata.block_tables = block_tables
@@ -388,6 +395,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
+                # Graph capture can run with active request ids; do not let
+                # dummy metadata consume per-request H2O warmup steps.
+                track_h2o_request_state=False,
             )
         else:
             raise NotImplementedError(
