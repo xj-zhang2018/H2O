@@ -41,7 +41,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertFalse(ascend_config.h2o_config.enabled)
         self.assertFalse(ascend_config.h2o_config.debug_log)
-        self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 1)
+        self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 0)
         self.assertIsNone(ascend_config.h2o_config.max_prune_seq_len)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
@@ -110,7 +110,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.score_coverage_ratio, 0.4)
         self.assertEqual(ascend_config.h2o_config.min_prune_ratio, 0.25)
         self.assertEqual(ascend_config.h2o_config.history_cluster_size, 2)
-        self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 1)
+        self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 0)
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_blocks, 24)
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_ratio, 0.42)
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_max_blocks, 64)
