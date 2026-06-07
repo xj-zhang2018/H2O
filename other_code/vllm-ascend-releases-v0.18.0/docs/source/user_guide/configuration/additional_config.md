@@ -77,7 +77,7 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `recent_blocks` | int | `None` | Optional fixed recent block budget. Overrides `recent_ratio` when set. |
 | `max_blocks` | int | `None` | Optional cap on selected blocks per request. When `adaptive_budget` and `adaptive_precision_ratio` are enabled, this is treated as the base cap and may be lifted or bypassed for accuracy-sensitive contexts. Recent blocks are kept first. |
 | `min_seq_len` | int | `0` | Minimum sequence length before H2O pruning is applied. |
-| `max_prune_seq_len` | int | `None` | Optional maximum sequence length for H2O pruning. Requests above this length keep the original full-attention metadata, which is useful when long-context TTFT or accuracy loss outweighs decode-token savings. |
+| `max_prune_seq_len` | int | `None` | Optional maximum sequence length for H2O pruning. Requests above this length keep the original full-attention metadata. Leave this unset when H2O must remain active for arbitrary long contexts. |
 | `score_decay` | float | `1.0` | Decay for the lightweight retained-block score proxy. Must be in `(0, 1]`. |
 | `adaptive_budget` | bool | `True` | When fixed block budgets are used, raise very small long-context budgets to `adaptive_min_keep_ratio`; when `max_blocks` is also set, `adaptive_precision_ratio` can further lift the selected-block target. |
 | `adaptive_min_keep_ratio` | float | `0.1` | Minimum selected-block ratio for fixed `heavy_blocks`/`recent_blocks` budgets. Set to `0` to disable this minimum-ratio lift. |
@@ -132,7 +132,7 @@ Example:
 }
 ```
 
-For mixed 10k, 20k, and 32k input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the guarded fast profile below when the priority is to avoid net latency or accuracy regression: it keeps the 10k path at a 32-block floor, disables the precision lift, keeps the first decode metadata full to reduce TTFT overhead, then applies H2O only up to `max_prune_seq_len=12288`. Longer 20k and 32k prompts keep full attention because the Python-side compact metadata overhead and reduced context quality can outweigh TPOT savings for 1k-output requests.
+For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. Use the precision-scaled fast profile below when H2O should remain active for every prompt length: it keeps a 32-block short-context floor, scales longer prompts to at least 50% of their valid KV blocks, keeps stronger sink and coverage budgets for quality, keeps the first two decode metadata builds full to reduce early-token risk, and avoids `max_prune_seq_len` so 20k, 32k, and 100k prompts still use compact H2O metadata.
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -143,7 +143,7 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":16,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"max_prune_seq_len":12288,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"history_cluster_size":2,"sink_blocks":4,"anchor_ratio":0.30,"score_explore_ratio":0.15,"score_coverage_ratio":0.35,"decode_full_attention_steps":1,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":32,"score_update_on_cache_hit":false,"debug_log":false}}'
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":16,"recent_blocks":16,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.25,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":2,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.50,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":64,"score_update_on_cache_hit":false,"debug_log":false}}'
 ```
 
 **finegrained_tp_config**

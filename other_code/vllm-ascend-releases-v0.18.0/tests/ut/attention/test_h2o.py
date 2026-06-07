@@ -820,6 +820,55 @@ def test_h2o_pruner_fast_block_floor_scales_for_long_contexts():
     assert long_new_lens_list == [40 * 128]
 
 
+def test_h2o_pruner_precision_scaled_profile_keeps_long_context_active():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=16,
+        recent_blocks=16,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.0,
+        adaptive_precision_max_blocks=None,
+        min_prune_ratio=0.25,
+        decode_full_attention_steps=0,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.50,
+        decode_budget_taper_steps=0,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=64,
+    )
+
+    ten_k_tables = torch.arange(80, dtype=torch.int32).unsqueeze(0)
+    ten_k_lens = torch.tensor([80 * 128], dtype=torch.int32)
+    ten_k_new_tables, ten_k_new_lens, ten_k_new_lens_list = pruner.apply(
+        block_tables=ten_k_tables,
+        seq_lens=ten_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["ten-k"],
+    )
+
+    assert ten_k_new_tables.shape == (1, 40)
+    assert ten_k_new_tables[0, :40].tolist()[-16:] == list(range(64, 80))
+    assert ten_k_new_lens.tolist() == [40 * 128]
+    assert ten_k_new_lens_list == [40 * 128]
+
+    thirty_k_tables = torch.arange(240, dtype=torch.int32).unsqueeze(0)
+    thirty_k_lens = torch.tensor([240 * 128], dtype=torch.int32)
+    thirty_k_new_tables, thirty_k_new_lens, thirty_k_new_lens_list = pruner.apply(
+        block_tables=thirty_k_tables,
+        seq_lens=thirty_k_lens,
+        block_size=128,
+        config=config,
+        request_ids=["thirty-k"],
+    )
+
+    assert thirty_k_new_tables.shape == (1, 120)
+    assert thirty_k_new_tables[0, :120].tolist()[-16:] == list(range(224, 240))
+    assert thirty_k_new_lens.tolist() == [120 * 128]
+    assert thirty_k_new_lens_list == [120 * 128]
+
+
 def test_h2o_pruner_prunes_once_taper_has_enough_savings():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
