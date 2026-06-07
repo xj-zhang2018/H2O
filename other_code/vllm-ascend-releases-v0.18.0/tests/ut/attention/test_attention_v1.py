@@ -80,6 +80,27 @@ class TestAscendAttentionMetadataBuilder(TestBase):
                                                       self.mock_vllm_config,
                                                       self.mock_device)
 
+    def _make_common_attn_metadata(
+            self,
+            attn_state=AscendAttentionState.DecodeOnly,
+            max_query_len=1):
+        return AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 2, 3]),
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 3]),
+            seq_lens_cpu=torch.tensor([640, 640, 640]),
+            num_reqs=3,
+            num_actual_tokens=3,
+            max_query_len=max_query_len,
+            decode_token_per_req=torch.tensor([1, 1, 1]),
+            block_table_tensor=torch.zeros((10, 10)),
+            slot_mapping=torch.tensor(range(20)),
+            actual_seq_lengths_q=[1, 1, 1],
+            positions=torch.tensor([10, 10]),
+            attn_state=attn_state,
+            num_computed_tokens_cpu=None,
+            seq_lens=None,
+            max_seq_len=640)
+
     def test_reorder_batch(self):
         mock_input_batch = MagicMock()
         mock_scheduler_output = MagicMock()
@@ -91,25 +112,33 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     def test_build(self, mock_ascend_metadata):
-        common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=torch.tensor([0, 2, 5, 9]),
-            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
-            seq_lens_cpu=torch.tensor([4, 5, 6]),
-            num_reqs=3,
-            num_actual_tokens=15,
-            max_query_len=6,
-            decode_token_per_req=torch.tensor([1, 1, 1]),
-            block_table_tensor=torch.zeros((10, 10)),
-            slot_mapping=torch.tensor(range(20)),
-            actual_seq_lengths_q=torch.tensor([0, 1, 2]),
-            positions=torch.tensor([10, 10]),
+        common_attn_metadata = self._make_common_attn_metadata(
             attn_state=AscendAttentionState.ChunkedPrefill,
-            num_computed_tokens_cpu=None,
-            seq_lens=None,
-            max_seq_len=6)
+            max_query_len=6)
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+    def test_build_applies_h2o_by_default(self):
+        common_attn_metadata = self._make_common_attn_metadata()
+
+        with patch.object(self.builder, '_maybe_apply_h2o') as mock_h2o:
+            self.builder.build(0, common_attn_metadata)
+
+        mock_h2o.assert_called_once()
+        self.assertTrue(mock_h2o.call_args.kwargs['track_request_state'])
+
+    def test_build_for_graph_capture_skips_h2o(self):
+        common_attn_metadata = self._make_common_attn_metadata()
+
+        with patch.object(self.builder, '_maybe_apply_h2o') as mock_h2o, \
+                patch.object(self.builder, '_maybe_prepare_h2o_graph_capture') as mock_capture:
+            metadata = self.builder.build_for_graph_capture(
+                common_attn_metadata, AscendAttentionState.DecodeOnly)
+
+        mock_h2o.assert_not_called()
+        mock_capture.assert_called_once_with(metadata)
+        self.assertEqual(metadata.attn_state, AscendAttentionState.DecodeOnly)
 
 
 class TestAscendAttentionBackendImpl(TestBase):

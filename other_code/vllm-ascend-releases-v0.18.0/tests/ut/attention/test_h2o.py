@@ -174,6 +174,33 @@ def test_h2o_pruner_compacts_batch_with_single_gather_width():
     assert new_lens_list == [2 * 128, 2 * 128]
 
 
+def test_h2o_pruner_builds_graph_capture_metadata_without_state():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=1,
+        recent_blocks=1,
+        adaptive_budget=False,
+    )
+    block_tables = torch.arange(12, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([12 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.build_graph_capture_metadata(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        seq_lens_list=[12 * 128],
+    )
+
+    assert new_tables.shape == (1, 2)
+    assert torch.equal(new_tables, block_tables[:, :2])
+    assert new_lens.tolist() == [2 * 128]
+    assert new_lens_list == [2 * 128]
+    assert pruner._decode_steps == {}
+    assert pruner._scores == {}
+    assert pruner._selection_cache == {}
+
+
 def test_h2o_pruner_skips_compaction_when_prune_ratio_is_too_small():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(

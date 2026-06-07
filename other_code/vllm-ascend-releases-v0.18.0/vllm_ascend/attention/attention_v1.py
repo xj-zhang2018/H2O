@@ -272,6 +272,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         track_h2o_request_state: bool = True,
+        apply_h2o: bool = True,
     ) -> AscendMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -327,11 +328,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )
-        self._maybe_apply_h2o(
-            attn_metadata,
-            common_attn_metadata,
-            track_request_state=track_h2o_request_state,
-        )
+        if apply_h2o:
+            self._maybe_apply_h2o(
+                attn_metadata,
+                common_attn_metadata,
+                track_request_state=track_h2o_request_state,
+            )
         return attn_metadata
 
     def _maybe_apply_h2o(
@@ -382,6 +384,46 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         attn_metadata.seq_lens_cpu = seq_lens
         attn_metadata.seq_lens_list = seq_lens_list
 
+    def _maybe_prepare_h2o_graph_capture(
+        self,
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+            return
+        if isinstance(self.kv_cache_spec, CrossAttentionSpec):
+            return
+        if attn_metadata.block_tables is None or attn_metadata.seq_lens is None:
+            return
+        try:
+            h2o_config = get_ascend_config().h2o_config
+        except RuntimeError:
+            return
+        if not h2o_config.enabled:
+            return
+
+        hf_text_config = getattr(self.model_config, "hf_text_config", None)
+        if getattr(hf_text_config, "sliding_window", None) is not None:
+            return
+        if (
+            getattr(hf_text_config, "alibi", False)
+            or getattr(hf_text_config, "alibi_bias_max", None) is not None
+            or getattr(hf_text_config, "position_embedding_type", None) == "alibi"
+        ):
+            return
+
+        block_size = getattr(self.kv_cache_spec, "block_size", self.vllm_config.cache_config.block_size)
+        block_tables, seq_lens, seq_lens_list = self.h2o_pruner.build_graph_capture_metadata(
+            block_tables=attn_metadata.block_tables,
+            seq_lens=attn_metadata.seq_lens,
+            block_size=block_size,
+            config=h2o_config,
+            seq_lens_list=attn_metadata.seq_lens_list,
+        )
+        attn_metadata.block_tables = block_tables
+        attn_metadata.seq_lens = seq_lens
+        attn_metadata.seq_lens_cpu = seq_lens
+        attn_metadata.seq_lens_list = seq_lens_list
+
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -398,7 +440,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 # Graph capture can run with active request ids; do not let
                 # dummy metadata consume per-request H2O warmup steps.
                 track_h2o_request_state=False,
+                # Runtime graph updates replace block tables and sequence
+                # lengths with live decode metadata. Keep H2O out of dummy
+                # capture so its compaction work is not charged to TTFT.
+                apply_h2o=False,
             )
+            self._maybe_prepare_h2o_graph_capture(attn_metadata)
         else:
             raise NotImplementedError(
                 "Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state"

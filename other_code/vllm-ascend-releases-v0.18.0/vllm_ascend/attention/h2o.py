@@ -324,6 +324,96 @@ class H2OBlockPruner:
             source_cache_key,
         )
 
+    def build_graph_capture_metadata(
+        self,
+        *,
+        block_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_size: int,
+        config: Any,
+        seq_lens_list: Sequence[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        if seq_lens_list is None:
+            resolved_seq_lens = [] if seq_lens is None else [int(x) for x in seq_lens.tolist()]
+        else:
+            resolved_seq_lens = [int(x) for x in seq_lens_list]
+
+        if block_tables is None or seq_lens is None or block_size <= 0:
+            return block_tables, seq_lens, resolved_seq_lens
+
+        valid_block_counts = [
+            math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in resolved_seq_lens
+        ]
+        total_original_blocks = 0
+        planned_kept_blocks = 0
+        planned_row_lengths: list[int] = []
+        compact_seq_lens: list[int] = []
+        changed = False
+
+        for seq_len, valid_blocks in zip(resolved_seq_lens, valid_block_counts):
+            if seq_len <= 0 or valid_blocks <= 0:
+                planned_row_lengths.append(1)
+                compact_seq_lens.append(0)
+                continue
+
+            total_original_blocks += valid_blocks
+            if (
+                seq_len < config.min_seq_len
+                or self._should_skip_for_max_prune_seq_len(seq_len, config)
+                or self._should_keep_full_context(valid_blocks, config)
+                or getattr(config, "decode_full_attention_steps", 0) > 0
+            ):
+                planned_blocks = valid_blocks
+            else:
+                heavy_blocks, recent_blocks = self._resolve_budgets(seq_len, valid_blocks, block_size, config)
+                block_cap = self._resolve_block_cap(valid_blocks, config)
+                if block_cap is not None:
+                    recent_blocks = min(recent_blocks, block_cap)
+                    heavy_blocks = min(heavy_blocks, max(block_cap - recent_blocks, 0))
+                planned_blocks = min(valid_blocks, max(heavy_blocks + recent_blocks, 1))
+                changed = changed or planned_blocks < valid_blocks
+
+            planned_row_lengths.append(planned_blocks)
+            planned_kept_blocks += planned_blocks
+            compact_seq_lens.append(min(seq_len, planned_blocks * block_size))
+
+        if not changed:
+            return block_tables, seq_lens, resolved_seq_lens
+
+        has_budget_savings = self._has_enough_pruning_savings(
+            total_original_blocks,
+            planned_kept_blocks,
+            config,
+        )
+        has_metadata_shape_savings = self._has_enough_metadata_shape_savings(
+            total_original_blocks,
+            planned_row_lengths,
+            valid_block_counts,
+            block_tables.shape[1],
+            config,
+        )
+        if not has_budget_savings or not has_metadata_shape_savings:
+            return block_tables, seq_lens, resolved_seq_lens
+
+        metadata_width = self._resolve_compact_metadata_width(
+            max(planned_row_lengths, default=1),
+            block_tables.shape[1],
+            config,
+        )
+        if metadata_width >= block_tables.shape[1]:
+            return block_tables, seq_lens, resolved_seq_lens
+
+        compact_seq_lens_list = [int(seq_len) for seq_len in compact_seq_lens]
+        return (
+            block_tables[:, :metadata_width],
+            torch.tensor(
+                compact_seq_lens_list,
+                dtype=seq_lens.dtype,
+                device=seq_lens.device,
+            ),
+            compact_seq_lens_list,
+        )
+
     def _can_keep_original_metadata(
         self,
         seq_lens: Sequence[int],
