@@ -139,7 +139,7 @@ Example:
 }
 ```
 
-For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. H2O is decode-only, so TTFT should stay close to the prefill baseline while TPOT and long-output E2E improve. Use the capped fast profile below when H2O should remain active for every prompt length without adding first-token setup overhead: it skips H2O for dummy decode graph-capture metadata, compacts real runtime decode metadata from the first decode build, keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, pads compact block-table metadata to a stable 64-column width to avoid length-specific decode graph updates, keeps stronger sink and recent budgets for quality, and avoids `max_prune_seq_len` so 20k, 32k, and max-model-len-permitted 100k prompts still use compact H2O metadata. The small metadata shape guard prevents 120-request continuous batches from mixing one full-context row with many pruned rows into a full-width gathered block table while preserving the intentional 64-column padding used by the 10k fast path.
+For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. H2O is decode-only, so TTFT should stay close to the prefill baseline while TPOT and long-output E2E improve. Use the capped fast profile below when H2O should remain active for every prompt length without adding first-token setup overhead: it skips H2O for dummy decode graph-capture metadata, compacts real runtime decode metadata from the first decode build, keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, pads compact block-table metadata to a stable 64-column width to avoid length-specific decode graph updates, keeps stronger sink and recent budgets for quality, and avoids `max_prune_seq_len` so 20k, 32k, and max-model-len-permitted 100k prompts still use compact H2O metadata. This profile is latency-first: on a 20k-token single request it can retain roughly 5k tokens from the first decode token, so use the conservative quality-validation profile below before judging long-context answer quality. The small metadata shape guard prevents 120-request continuous batches from mixing one full-context row with many pruned rows into a full-width gathered block table while preserving the intentional 64-column padding used by the 10k fast path.
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -170,6 +170,21 @@ vllm serve /path/to/model \
 ```
 
 If asynchronous timing does not identify the bottleneck, repeat a much shorter run with `"debug_timing_sync":true` to measure synchronized NPU wall time. Do not compare that synchronized run directly against throughput benchmarks.
+
+For single-request quality validation on long prompts, first compare with H2O disabled, then use a conservative H2O profile that keeps full attention for early decode tokens and raises the compact window before returning to the faster service profile:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+VLLM_USE_V1=1 \
+vllm serve /path/to/model \
+  --served-model-name h2o-model \
+  --tensor-parallel-size 8 \
+  --max-model-len 40960 \
+  --max-num-seqs 32 \
+  --block-size 128 \
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":48,"recent_blocks":48,"max_blocks":96,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.50,"adaptive_precision_max_blocks":128,"min_prune_ratio":0.30,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":16,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":64,"decode_budget_fast_blocks":96,"decode_budget_fast_ratio":0.50,"decode_budget_fast_max_blocks":128,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":32,"score_update_on_cache_hit":false,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
+```
 
 **finegrained_tp_config**
 
