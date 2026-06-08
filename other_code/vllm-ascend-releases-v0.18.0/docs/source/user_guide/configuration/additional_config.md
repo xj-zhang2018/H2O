@@ -94,6 +94,8 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `decode_budget_fast_blocks` | int | `None` | Optional explicit selected-block target after the decode budget taper. When set with `decode_budget_fast_ratio=0`, it takes precedence so long-running decode can converge to a predictable acceleration-oriented block count. When set with a positive `decode_budget_fast_ratio`, it becomes the short-context floor and the ratio may lift longer contexts above this fixed count. Once the selected budget reaches the fixed target, compact metadata also uses this width instead of the precision padding width. |
 | `decode_budget_fast_ratio` | float | `0.45` | Target selected-block ratio after the decode budget taper when `decode_budget_fast_blocks` is unset. When `decode_budget_fast_blocks` is also set, this ratio provides a length-aware minimum so one fixed fast block count does not over-compress longer prompts. Set to `0` to disable ratio-based tapering or lifting. When `max_blocks` is set and `decode_budget_fast_blocks` is unset, the taper target is capped by `max_blocks` so late decode can return to the acceleration-oriented budget. |
 | `decode_budget_fast_max_blocks` | int | `None` | Optional upper bound for the length-scaled fast budget. Use this with `decode_budget_fast_blocks` and `decode_budget_fast_ratio` to keep H2O active for arbitrary long prompts without letting the selected block count grow linearly forever. When the selected budget is under this cap, compact block-table metadata is also padded to this width while `seq_lens` still limits the actual attended tokens, keeping decode graph/update shapes stable across prompt lengths. |
+| `auto_tune` | bool | `True` | Enables the automatic long-context decode policy. When the active context has more blocks than `auto_tune_max_blocks`, H2O treats that value as a hard selected-block cap, disables full-context decode warmup for that long request, and prevents adaptive precision guards from silently keeping full-width metadata. Set this to `False` to preserve a fully manual H2O profile. |
+| `auto_tune_max_blocks` | int | `64` | Maximum selected blocks and compact metadata width used by `auto_tune` for long contexts. The final target is still length-aware through `decode_budget_fast_ratio`, but it is capped at this width so 10k, 20k, 32k, and longer prompts do not require separate per-length launch parameters. Set to `None` to keep `auto_tune` enabled without this cap. |
 | `decode_budget_taper_steps` | int | `256` | Number of decode steps used to move from the initial precision-oriented block target toward `decode_budget_fast_ratio`. Set to `0` to disable tapering. |
 | `decode_budget_taper_start_step` | int | `64` | Number of initial decode steps to keep the full precision-oriented block target before tapering starts. |
 | `selection_refresh_interval` | int | `4` | Number of decode steps between score-guided historical block reselections when the selected-block budget is stable. Set to `1` to recompute every step. Budget or context-length changes still refresh immediately. |
@@ -127,6 +129,9 @@ Example:
         "decode_full_attention_steps": 0,
         "decode_budget_fast_blocks": null,
         "decode_budget_fast_ratio": 0.45,
+        "decode_budget_fast_max_blocks": null,
+        "auto_tune": True,
+        "auto_tune_max_blocks": 64,
         "decode_budget_taper_steps": 256,
         "decode_budget_taper_start_step": 64,
         "selection_refresh_interval": 4,
@@ -139,7 +144,7 @@ Example:
 }
 ```
 
-For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. H2O is decode-only, so TTFT should stay close to the prefill baseline while TPOT and long-output E2E improve. Use the capped fast profile below when H2O should remain active for every prompt length without adding first-token setup overhead: it skips H2O for dummy decode graph-capture metadata, compacts real runtime decode metadata from the first decode build, keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, pads compact block-table metadata to a stable 64-column width to avoid length-specific decode graph updates, keeps stronger sink and recent budgets for quality, and avoids `max_prune_seq_len` so 20k, 32k, and max-model-len-permitted 100k prompts still use compact H2O metadata. This profile is latency-first: on a 20k-token single request it can retain roughly 5k tokens from the first decode token, so use the conservative quality-validation profile below before judging long-context answer quality. The small metadata shape guard prevents 120-request continuous batches from mixing one full-context row with many pruned rows into a full-width gathered block table while preserving the intentional 64-column padding used by the 10k fast path.
+For mixed 10k, 20k, 32k, and longer input / 1k output service benchmarks, the default automatic policy is the recommended starting point. It caps long-context decode metadata to a stable width, applies compact metadata from the first real decode step when the context is longer than the cap, and avoids having to retune `heavy_blocks`, `recent_blocks`, or `max_blocks` for each prompt length:
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -150,7 +155,22 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
+  --additional-config='{"h2o_config":{"enabled":true,"min_seq_len":4096,"auto_tune":true,"auto_tune_max_blocks":64,"selection_refresh_interval":128,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
+```
+
+For mixed 10k, 20k, 32k, and longer input / 1k output, batch-size 32 service benchmarks, prefer the Ascend page-attention block size of 128 to reduce per-request block-table length before applying H2O. H2O is decode-only, so TTFT should stay close to the prefill baseline while TPOT and long-output E2E improve. Use the capped fast profile below when H2O should remain active for every prompt length without adding first-token setup overhead: it bounds graph-capture and runtime decode metadata from the first decode build, keeps a 32-block short-context floor, scales 20k and 30k prompts to smaller active KV windows, caps very long prompts at 64 selected blocks, pads compact block-table metadata to a stable 64-column width to avoid length-specific decode graph updates, keeps stronger sink and recent budgets for quality, and avoids `max_prune_seq_len` so 20k, 32k, and max-model-len-permitted 100k prompts still use compact H2O metadata. This profile is latency-first: on a 20k-token single request it can retain roughly 5k tokens from the first decode token, so use the conservative quality-validation profile below before judging long-context answer quality. The small metadata shape guard prevents 120-request continuous batches from mixing one full-context row with many pruned rows into a full-width gathered block table while preserving the intentional 64-column padding used by the 10k fast path.
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+VLLM_USE_V1=1 \
+vllm serve /path/to/model \
+  --served-model-name h2o-model \
+  --tensor-parallel-size 8 \
+  --max-model-len 40960 \
+  --max-num-seqs 32 \
+  --block-size 128 \
+  --additional-config='{"h2o_config":{"enabled":true,"auto_tune":true,"auto_tune_max_blocks":64,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
 ```
 
@@ -165,7 +185,7 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":true,"debug_interval":50,"debug_timing":true,"debug_timing_sync":false}}' \
+  --additional-config='{"h2o_config":{"enabled":true,"auto_tune":true,"auto_tune_max_blocks":64,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":true,"debug_interval":50,"debug_timing":true,"debug_timing_sync":false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
 ```
 
@@ -182,7 +202,7 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":48,"recent_blocks":48,"max_blocks":96,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.50,"adaptive_precision_max_blocks":128,"min_prune_ratio":0.30,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":16,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":64,"decode_budget_fast_blocks":96,"decode_budget_fast_ratio":0.50,"decode_budget_fast_max_blocks":128,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":32,"score_update_on_cache_hit":false,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
+  --additional-config='{"h2o_config":{"enabled":true,"auto_tune":false,"heavy_blocks":48,"recent_blocks":48,"max_blocks":96,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.50,"adaptive_precision_max_blocks":128,"min_prune_ratio":0.30,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":16,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":64,"decode_budget_fast_blocks":96,"decode_budget_fast_ratio":0.50,"decode_budget_fast_max_blocks":128,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":32,"score_update_on_cache_hit":false,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
 ```
 

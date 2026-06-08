@@ -152,7 +152,7 @@ class H2OBlockPruner:
                         "above-max-prune-seq-len",
                     )
                 continue
-            if self._should_keep_full_decode_step(req_index, config, request_ids):
+            if self._should_keep_full_decode_step(req_index, config, request_ids, valid_blocks):
                 selected_block_rows.append(list(range(valid_blocks)))
                 total_kept_blocks += valid_blocks
                 planned_kept_blocks += valid_blocks
@@ -191,8 +191,12 @@ class H2OBlockPruner:
             heavy_blocks, recent_blocks = self._resolve_budgets(seq_len, valid_blocks, block_size, config)
             block_cap = self._resolve_block_cap(valid_blocks, config)
             if block_cap is not None:
-                recent_blocks = min(recent_blocks, block_cap)
-                heavy_blocks = min(heavy_blocks, max(block_cap - recent_blocks, 0))
+                heavy_blocks, recent_blocks = self._apply_block_cap(
+                    heavy_blocks,
+                    recent_blocks,
+                    block_cap,
+                    config,
+                )
             heavy_blocks, recent_blocks = self._apply_decode_budget_taper(
                 req_index,
                 valid_blocks,
@@ -438,15 +442,22 @@ class H2OBlockPruner:
                 seq_len < config.min_seq_len
                 or self._should_skip_for_max_prune_seq_len(seq_len, config)
                 or self._should_keep_full_context(valid_blocks, config)
-                or getattr(config, "decode_full_attention_steps", 0) > 0
+                or (
+                    getattr(config, "decode_full_attention_steps", 0) > 0
+                    and self._auto_tune_block_cap(valid_blocks, config) is None
+                )
             ):
                 planned_blocks = valid_blocks
             else:
                 heavy_blocks, recent_blocks = self._resolve_budgets(seq_len, valid_blocks, block_size, config)
                 block_cap = self._resolve_block_cap(valid_blocks, config)
                 if block_cap is not None:
-                    recent_blocks = min(recent_blocks, block_cap)
-                    heavy_blocks = min(heavy_blocks, max(block_cap - recent_blocks, 0))
+                    heavy_blocks, recent_blocks = self._apply_block_cap(
+                        heavy_blocks,
+                        recent_blocks,
+                        block_cap,
+                        config,
+                    )
                 planned_blocks = min(valid_blocks, max(heavy_blocks + recent_blocks, 1))
                 changed = changed or planned_blocks < valid_blocks
 
@@ -509,7 +520,7 @@ class H2OBlockPruner:
                 continue
             if H2OBlockPruner._should_keep_full_context(valid_blocks, config):
                 continue
-            if self._should_keep_full_decode_step(req_index, config, request_ids):
+            if self._should_keep_full_decode_step(req_index, config, request_ids, valid_blocks):
                 continue
             return False
         return True
@@ -528,7 +539,7 @@ class H2OBlockPruner:
                 continue
             if self._should_keep_full_context(valid_blocks, config):
                 continue
-            if self._should_keep_full_decode_step(req_index, config, request_ids):
+            if self._should_keep_full_decode_step(req_index, config, request_ids, valid_blocks):
                 self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
 
     def _apply_score_updates(
@@ -608,6 +619,13 @@ class H2OBlockPruner:
     @staticmethod
     def _resolve_compact_metadata_width(max_selected_blocks: int, block_table_width: int, config: Any) -> int:
         metadata_width = max_selected_blocks
+        auto_tune_width = H2OBlockPruner._auto_tune_metadata_width(
+            max_selected_blocks,
+            block_table_width,
+            config,
+        )
+        if auto_tune_width is not None:
+            return auto_tune_width
         fast_max_blocks = getattr(config, "decode_budget_fast_max_blocks", None)
         if fast_max_blocks is not None and max_selected_blocks <= int(fast_max_blocks):
             return max(1, min(max(metadata_width, int(fast_max_blocks)), block_table_width))
@@ -891,17 +909,33 @@ class H2OBlockPruner:
 
     @staticmethod
     def _resolve_block_cap(valid_blocks: int, config: Any) -> int | None:
+        auto_tune_cap = H2OBlockPruner._auto_tune_block_cap(valid_blocks, config)
         max_blocks = getattr(config, "max_blocks", None)
-        if max_blocks is None:
+        if max_blocks is None and auto_tune_cap is None:
             return None
-        block_cap = min(max_blocks, valid_blocks)
+        block_cap = auto_tune_cap if max_blocks is None else min(max_blocks, valid_blocks)
         precision_blocks = H2OBlockPruner._adaptive_precision_blocks(valid_blocks, config)
         if precision_blocks is not None:
             block_cap = max(block_cap, precision_blocks)
         fast_target_blocks = H2OBlockPruner._length_scaled_fast_blocks(valid_blocks, config)
         if fast_target_blocks is not None:
             block_cap = max(block_cap, fast_target_blocks)
+        if auto_tune_cap is not None:
+            block_cap = min(block_cap, auto_tune_cap)
         return min(block_cap, valid_blocks)
+
+    @staticmethod
+    def _apply_block_cap(
+        heavy_blocks: int,
+        recent_blocks: int,
+        block_cap: int,
+        config: Any,
+    ) -> tuple[int, int]:
+        block_cap = max(int(block_cap), 1)
+        min_heavy_blocks = min(heavy_blocks, getattr(config, "sink_blocks", 1), block_cap)
+        recent_blocks = min(recent_blocks, max(block_cap - min_heavy_blocks, 0))
+        heavy_blocks = min(heavy_blocks, max(block_cap - recent_blocks, min_heavy_blocks))
+        return heavy_blocks, recent_blocks
 
     @staticmethod
     def _adaptive_precision_blocks(valid_blocks: int, config: Any) -> int | None:
@@ -933,6 +967,8 @@ class H2OBlockPruner:
     def _should_keep_full_context(valid_blocks: int, config: Any) -> bool:
         if valid_blocks <= 0:
             return True
+        if H2OBlockPruner._auto_tune_block_cap(valid_blocks, config) is not None:
+            return False
         if not getattr(config, "adaptive_budget", True):
             return False
         if getattr(config, "max_blocks", None) is None:
@@ -952,13 +988,47 @@ class H2OBlockPruner:
     def _length_scaled_fast_blocks(valid_blocks: int, config: Any) -> int | None:
         fast_blocks = getattr(config, "decode_budget_fast_blocks", None)
         fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
-        if fast_blocks is None or fast_ratio <= 0:
+        if fast_blocks is None:
             return None
-        target_blocks = max(int(fast_blocks), math.ceil(valid_blocks * fast_ratio), 1)
+        if fast_ratio <= 0:
+            target_blocks = max(int(fast_blocks), 1)
+        else:
+            target_blocks = max(int(fast_blocks), math.ceil(valid_blocks * fast_ratio), 1)
         fast_max_blocks = getattr(config, "decode_budget_fast_max_blocks", None)
         if fast_max_blocks is not None:
             target_blocks = min(target_blocks, int(fast_max_blocks))
         return min(target_blocks, valid_blocks)
+
+    @staticmethod
+    def _auto_tune_block_cap(valid_blocks: int, config: Any) -> int | None:
+        if not getattr(config, "auto_tune", True):
+            return None
+        auto_tune_max_blocks = getattr(config, "auto_tune_max_blocks", 64)
+        if auto_tune_max_blocks is None:
+            return None
+        auto_tune_max_blocks = int(auto_tune_max_blocks)
+        if valid_blocks <= auto_tune_max_blocks:
+            return None
+
+        fast_ratio = getattr(config, "decode_budget_fast_ratio", 0.0)
+        if fast_ratio > 0:
+            target_blocks = math.ceil(valid_blocks * fast_ratio)
+        else:
+            target_blocks = valid_blocks
+        target_blocks = min(max(target_blocks, 1), auto_tune_max_blocks)
+        return min(target_blocks, valid_blocks)
+
+    @staticmethod
+    def _auto_tune_metadata_width(max_selected_blocks: int, block_table_width: int, config: Any) -> int | None:
+        if not getattr(config, "auto_tune", True):
+            return None
+        auto_tune_max_blocks = getattr(config, "auto_tune_max_blocks", 64)
+        if auto_tune_max_blocks is None:
+            return None
+        auto_tune_max_blocks = int(auto_tune_max_blocks)
+        if block_table_width <= auto_tune_max_blocks or max_selected_blocks > auto_tune_max_blocks:
+            return None
+        return max(1, min(auto_tune_max_blocks, block_table_width))
 
     @staticmethod
     def _blocks_from_budget(
@@ -1031,7 +1101,10 @@ class H2OBlockPruner:
         req_index: int,
         config: Any,
         request_ids: Sequence[Any] | None,
+        valid_blocks: int | None = None,
     ) -> bool:
+        if valid_blocks is not None and self._auto_tune_block_cap(valid_blocks, config) is not None:
+            return False
         warmup_steps = getattr(config, "decode_full_attention_steps", 1)
         if warmup_steps <= 0:
             return False

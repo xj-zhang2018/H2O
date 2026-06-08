@@ -406,6 +406,8 @@ class H2OConfig:
         self.decode_budget_fast_blocks = h2o_config.get("decode_budget_fast_blocks", None)
         self.decode_budget_fast_ratio = float(h2o_config.get("decode_budget_fast_ratio", 0.45))
         self.decode_budget_fast_max_blocks = h2o_config.get("decode_budget_fast_max_blocks", None)
+        self.auto_tune = bool(h2o_config.get("auto_tune", True))
+        self.auto_tune_max_blocks = h2o_config.get("auto_tune_max_blocks", 64)
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))
         self.decode_budget_taper_start_step = int(h2o_config.get("decode_budget_taper_start_step", 64))
         self.selection_refresh_interval = int(h2o_config.get("selection_refresh_interval", 4))
@@ -438,6 +440,8 @@ class H2OConfig:
                 f"decode_budget_fast_blocks={self.decode_budget_fast_blocks}, "
                 f"decode_budget_fast_ratio={self.decode_budget_fast_ratio}, "
                 f"decode_budget_fast_max_blocks={self.decode_budget_fast_max_blocks}, "
+                f"auto_tune={self.auto_tune}, "
+                f"auto_tune_max_blocks={self.auto_tune_max_blocks}, "
                 f"decode_budget_taper_steps={self.decode_budget_taper_steps}, "
                 f"decode_budget_taper_start_step={self.decode_budget_taper_start_step}, "
                 f"selection_refresh_interval={self.selection_refresh_interval}, "
@@ -468,6 +472,7 @@ class H2OConfig:
         self._validate_optional_blocks("sink_blocks", self.sink_blocks)
         self._validate_optional_blocks("decode_budget_fast_blocks", self.decode_budget_fast_blocks)
         self._validate_optional_blocks("decode_budget_fast_max_blocks", self.decode_budget_fast_max_blocks)
+        self._validate_optional_blocks("auto_tune_max_blocks", self.auto_tune_max_blocks)
         if self.max_blocks == 0:
             raise ValueError("h2o_config.max_blocks must be greater than 0 when set")
         if self.adaptive_precision_max_blocks == 0:
@@ -476,6 +481,8 @@ class H2OConfig:
             raise ValueError("h2o_config.decode_budget_fast_blocks must be greater than 0 when set")
         if self.decode_budget_fast_max_blocks == 0:
             raise ValueError("h2o_config.decode_budget_fast_max_blocks must be greater than 0 when set")
+        if self.auto_tune_max_blocks == 0:
+            raise ValueError("h2o_config.auto_tune_max_blocks must be greater than 0 when set")
         if (
             self.decode_budget_fast_blocks is not None
             and self.decode_budget_fast_max_blocks is not None

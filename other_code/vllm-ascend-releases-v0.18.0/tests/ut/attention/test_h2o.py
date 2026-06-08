@@ -32,6 +32,8 @@ class H2OConfigStub:
     decode_budget_fast_blocks: int | None = None
     decode_budget_fast_ratio: float = 0.45
     decode_budget_fast_max_blocks: int | None = None
+    auto_tune: bool = True
+    auto_tune_max_blocks: int | None = 64
     decode_budget_taper_steps: int = 256
     decode_budget_taper_start_step: int = 64
     selection_refresh_interval: int = 4
@@ -349,7 +351,7 @@ def test_h2o_pruner_always_keeps_current_block():
 
 def test_h2o_pruner_expands_small_fixed_budget_for_long_context():
     pruner = H2OBlockPruner()
-    config = H2OConfigStub(heavy_blocks=2, recent_blocks=2)
+    config = H2OConfigStub(heavy_blocks=2, recent_blocks=2, auto_tune=False)
     block_tables = torch.arange(100, dtype=torch.int32).unsqueeze(0)
     seq_lens = torch.tensor([100 * 128], dtype=torch.int32)
 
@@ -373,6 +375,7 @@ def test_h2o_pruner_can_keep_max_blocks_strict_when_precision_lift_disabled():
         recent_blocks=2,
         max_blocks=6,
         adaptive_precision_ratio=0.0,
+        auto_tune=False,
     )
     block_tables = torch.arange(100, dtype=torch.int32).unsqueeze(0)
     seq_lens = torch.tensor([100 * 128], dtype=torch.int32)
@@ -397,6 +400,7 @@ def test_h2o_pruner_keeps_full_context_under_precision_cap():
         recent_blocks=16,
         max_blocks=32,
         adaptive_min_keep_ratio=0.0,
+        auto_tune=False,
     )
     block_tables = torch.arange(75, dtype=torch.int32).unsqueeze(0)
     seq_lens = torch.tensor([75 * 128], dtype=torch.int32)
@@ -412,6 +416,75 @@ def test_h2o_pruner_keeps_full_context_under_precision_cap():
     assert torch.equal(new_tables, block_tables)
     assert torch.equal(new_lens, seq_lens)
     assert new_lens_list == [75 * 128]
+
+
+def test_h2o_pruner_auto_tune_caps_long_context_from_first_decode_step():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=48,
+        recent_blocks=48,
+        max_blocks=96,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.5,
+        adaptive_precision_max_blocks=128,
+        sink_blocks=1,
+        decode_full_attention_steps=64,
+        auto_tune=True,
+        auto_tune_max_blocks=64,
+    )
+    block_tables = torch.arange(157, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([157 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables.shape == (1, 64)
+    assert new_tables[0, 0].item() == 0
+    assert new_tables[0, -1].item() == 156
+    assert new_lens.tolist() == [64 * 128]
+    assert new_lens_list == [64 * 128]
+    assert pruner._decode_steps["req-0"] == 1
+
+
+def test_h2o_pruner_auto_tune_pads_compact_metadata_to_stable_width():
+    config = H2OConfigStub(auto_tune=True, auto_tune_max_blocks=64)
+
+    assert H2OBlockPruner._resolve_compact_metadata_width(36, 79, config) == 64
+    assert H2OBlockPruner._resolve_compact_metadata_width(64, 157, config) == 64
+    assert H2OBlockPruner._resolve_compact_metadata_width(20, 40, config) == 40
+
+
+def test_h2o_pruner_auto_tune_can_be_disabled_for_manual_profiles():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=48,
+        recent_blocks=48,
+        max_blocks=96,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.5,
+        adaptive_precision_max_blocks=128,
+        decode_full_attention_steps=64,
+        auto_tune=False,
+    )
+    block_tables = torch.arange(100, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([100 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert torch.equal(new_tables, block_tables)
+    assert torch.equal(new_lens, seq_lens)
+    assert new_lens_list == [100 * 128]
 
 
 def test_h2o_pruner_uses_scores_for_historical_anchors():
