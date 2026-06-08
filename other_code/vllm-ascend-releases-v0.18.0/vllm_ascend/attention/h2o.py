@@ -442,10 +442,7 @@ class H2OBlockPruner:
                 seq_len < config.min_seq_len
                 or self._should_skip_for_max_prune_seq_len(seq_len, config)
                 or self._should_keep_full_context(valid_blocks, config)
-                or (
-                    getattr(config, "decode_full_attention_steps", 0) > 0
-                    and self._auto_tune_block_cap(valid_blocks, config) is None
-                )
+                or self._should_skip_graph_capture_compaction(valid_blocks, config)
             ):
                 planned_blocks = valid_blocks
             else:
@@ -1031,6 +1028,18 @@ class H2OBlockPruner:
         return max(1, min(auto_tune_max_blocks, block_table_width))
 
     @staticmethod
+    def _auto_tune_warmup_steps(valid_blocks: int, config: Any) -> int:
+        if H2OBlockPruner._auto_tune_block_cap(valid_blocks, config) is None:
+            return 0
+        return max(int(getattr(config, "auto_tune_decode_warmup_steps", 1)), 0)
+
+    @staticmethod
+    def _should_skip_graph_capture_compaction(valid_blocks: int, config: Any) -> bool:
+        if H2OBlockPruner._auto_tune_warmup_steps(valid_blocks, config) > 0:
+            return True
+        return getattr(config, "decode_full_attention_steps", 0) > 0
+
+    @staticmethod
     def _blocks_from_budget(
         seq_len: int,
         valid_blocks: int,
@@ -1103,9 +1112,9 @@ class H2OBlockPruner:
         request_ids: Sequence[Any] | None,
         valid_blocks: int | None = None,
     ) -> bool:
-        if valid_blocks is not None and self._auto_tune_block_cap(valid_blocks, config) is not None:
-            return False
         warmup_steps = getattr(config, "decode_full_attention_steps", 1)
+        if valid_blocks is not None:
+            warmup_steps = max(warmup_steps, self._auto_tune_warmup_steps(valid_blocks, config))
         if warmup_steps <= 0:
             return False
         request_id = self._get_request_id(req_index, request_ids)

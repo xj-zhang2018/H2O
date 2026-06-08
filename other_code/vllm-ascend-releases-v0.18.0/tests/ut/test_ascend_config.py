@@ -47,6 +47,7 @@ class TestAscendConfig(TestBase):
         self.assertIsNone(ascend_config.h2o_config.max_prune_seq_len)
         self.assertTrue(ascend_config.h2o_config.auto_tune)
         self.assertEqual(ascend_config.h2o_config.auto_tune_max_blocks, 64)
+        self.assertEqual(ascend_config.h2o_config.auto_tune_decode_warmup_steps, 1)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -86,6 +87,7 @@ class TestAscendConfig(TestBase):
                 "decode_budget_fast_max_blocks": 64,
                 "auto_tune": False,
                 "auto_tune_max_blocks": 48,
+                "auto_tune_decode_warmup_steps": 2,
                 "decode_budget_taper_steps": 192,
                 "decode_budget_taper_start_step": 32,
                 "selection_refresh_interval": 8,
@@ -124,6 +126,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.decode_budget_fast_max_blocks, 64)
         self.assertFalse(ascend_config.h2o_config.auto_tune)
         self.assertEqual(ascend_config.h2o_config.auto_tune_max_blocks, 48)
+        self.assertEqual(ascend_config.h2o_config.auto_tune_decode_warmup_steps, 2)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_steps, 192)
         self.assertEqual(ascend_config.h2o_config.decode_budget_taper_start_step, 32)
         self.assertEqual(ascend_config.h2o_config.selection_refresh_interval, 8)
@@ -154,6 +157,15 @@ class TestAscendConfig(TestBase):
                 "heavy_blocks": 8,
                 "recent_blocks": 8,
                 "auto_tune_max_blocks": 0,
+            })
+
+    def test_h2o_config_rejects_negative_auto_tune_warmup_steps(self):
+        with self.assertRaisesRegex(ValueError, "auto_tune_decode_warmup_steps"):
+            H2OConfig({
+                "enabled": True,
+                "heavy_blocks": 8,
+                "recent_blocks": 8,
+                "auto_tune_decode_warmup_steps": -1,
             })
 
     @_clean_up_ascend_config

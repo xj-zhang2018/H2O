@@ -408,6 +408,7 @@ class H2OConfig:
         self.decode_budget_fast_max_blocks = h2o_config.get("decode_budget_fast_max_blocks", None)
         self.auto_tune = bool(h2o_config.get("auto_tune", True))
         self.auto_tune_max_blocks = h2o_config.get("auto_tune_max_blocks", 64)
+        self.auto_tune_decode_warmup_steps = int(h2o_config.get("auto_tune_decode_warmup_steps", 1))
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))
         self.decode_budget_taper_start_step = int(h2o_config.get("decode_budget_taper_start_step", 64))
         self.selection_refresh_interval = int(h2o_config.get("selection_refresh_interval", 4))
@@ -442,6 +443,7 @@ class H2OConfig:
                 f"decode_budget_fast_max_blocks={self.decode_budget_fast_max_blocks}, "
                 f"auto_tune={self.auto_tune}, "
                 f"auto_tune_max_blocks={self.auto_tune_max_blocks}, "
+                f"auto_tune_decode_warmup_steps={self.auto_tune_decode_warmup_steps}, "
                 f"decode_budget_taper_steps={self.decode_budget_taper_steps}, "
                 f"decode_budget_taper_start_step={self.decode_budget_taper_start_step}, "
                 f"selection_refresh_interval={self.selection_refresh_interval}, "
@@ -514,6 +516,8 @@ class H2OConfig:
             raise ValueError("h2o_config.decode_full_attention_steps must be non-negative")
         if not 0 <= self.decode_budget_fast_ratio <= 1.0:
             raise ValueError("h2o_config.decode_budget_fast_ratio must be in the range [0, 1]")
+        if self.auto_tune_decode_warmup_steps < 0:
+            raise ValueError("h2o_config.auto_tune_decode_warmup_steps must be non-negative")
         if self.decode_budget_taper_steps < 0:
             raise ValueError("h2o_config.decode_budget_taper_steps must be non-negative")
         if self.decode_budget_taper_start_step < 0:
