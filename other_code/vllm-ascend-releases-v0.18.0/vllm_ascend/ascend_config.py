@@ -408,7 +408,7 @@ class H2OConfig:
         self.decode_budget_fast_max_blocks = h2o_config.get("decode_budget_fast_max_blocks", None)
         self.auto_tune = bool(h2o_config.get("auto_tune", True))
         self.auto_tune_max_blocks = h2o_config.get("auto_tune_max_blocks", 64)
-        self.auto_tune_decode_warmup_steps = int(h2o_config.get("auto_tune_decode_warmup_steps", 4))
+        self.auto_tune_decode_warmup_steps = int(h2o_config.get("auto_tune_decode_warmup_steps", 0))
         self.decode_budget_taper_steps = int(h2o_config.get("decode_budget_taper_steps", 256))
         self.decode_budget_taper_start_step = int(h2o_config.get("decode_budget_taper_start_step", 64))
         self.selection_refresh_interval = int(h2o_config.get("selection_refresh_interval", 4))

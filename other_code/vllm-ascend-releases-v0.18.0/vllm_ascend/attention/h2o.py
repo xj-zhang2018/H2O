@@ -1043,7 +1043,7 @@ class H2OBlockPruner:
     def _auto_tune_warmup_steps(valid_blocks: int, config: Any) -> int:
         if H2OBlockPruner._auto_tune_block_cap(valid_blocks, config) is None:
             return 0
-        return max(int(getattr(config, "auto_tune_decode_warmup_steps", 4)), 0)
+        return max(int(getattr(config, "auto_tune_decode_warmup_steps", 0)), 0)
 
     @staticmethod
     def _should_skip_graph_capture_compaction(valid_blocks: int, config: Any) -> bool:
@@ -1124,7 +1124,7 @@ class H2OBlockPruner:
         request_ids: Sequence[Any] | None,
         valid_blocks: int | None = None,
     ) -> bool:
-        warmup_steps = getattr(config, "decode_full_attention_steps", 1)
+        warmup_steps = getattr(config, "decode_full_attention_steps", 0)
         if valid_blocks is not None:
             warmup_steps = max(warmup_steps, self._auto_tune_warmup_steps(valid_blocks, config))
         if warmup_steps <= 0:
