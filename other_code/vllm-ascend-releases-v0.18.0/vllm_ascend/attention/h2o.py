@@ -902,6 +902,9 @@ class H2OBlockPruner:
                 min_keep_blocks = min(min_keep_blocks, config.max_blocks)
             if min_keep_blocks > heavy_blocks + recent_blocks:
                 heavy_blocks += min_keep_blocks - heavy_blocks - recent_blocks
+        auto_tune_target = H2OBlockPruner._auto_tune_ratio_budget_target(valid_blocks, config)
+        if auto_tune_target is not None and heavy_blocks + recent_blocks < auto_tune_target:
+            heavy_blocks += auto_tune_target - heavy_blocks - recent_blocks
         return heavy_blocks, recent_blocks
 
     @staticmethod
@@ -1016,6 +1019,15 @@ class H2OBlockPruner:
         return min(target_blocks, valid_blocks)
 
     @staticmethod
+    def _auto_tune_ratio_budget_target(valid_blocks: int, config: Any) -> int | None:
+        if (
+            getattr(config, "heavy_blocks", None) is not None
+            or getattr(config, "recent_blocks", None) is not None
+        ):
+            return None
+        return H2OBlockPruner._auto_tune_block_cap(valid_blocks, config)
+
+    @staticmethod
     def _auto_tune_metadata_width(max_selected_blocks: int, block_table_width: int, config: Any) -> int | None:
         if not getattr(config, "auto_tune", True):
             return None
@@ -1031,7 +1043,7 @@ class H2OBlockPruner:
     def _auto_tune_warmup_steps(valid_blocks: int, config: Any) -> int:
         if H2OBlockPruner._auto_tune_block_cap(valid_blocks, config) is None:
             return 0
-        return max(int(getattr(config, "auto_tune_decode_warmup_steps", 1)), 0)
+        return max(int(getattr(config, "auto_tune_decode_warmup_steps", 4)), 0)
 
     @staticmethod
     def _should_skip_graph_capture_compaction(valid_blocks: int, config: Any) -> bool:

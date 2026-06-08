@@ -34,7 +34,7 @@ class H2OConfigStub:
     decode_budget_fast_max_blocks: int | None = None
     auto_tune: bool = True
     auto_tune_max_blocks: int | None = 64
-    auto_tune_decode_warmup_steps: int = 1
+    auto_tune_decode_warmup_steps: int = 4
     decode_budget_taper_steps: int = 256
     decode_budget_taper_start_step: int = 64
     selection_refresh_interval: int = 4
@@ -461,6 +461,69 @@ def test_h2o_pruner_auto_tune_defers_compaction_until_after_first_decode_step():
     assert second_lens.tolist() == [64 * 128]
     assert second_lens_list == [64 * 128]
     assert pruner._decode_steps["req-0"] == 2
+
+
+def test_h2o_pruner_auto_tune_lifts_ratio_budget_to_cap():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_ratio=0.1,
+        recent_ratio=0.1,
+        heavy_blocks=None,
+        recent_blocks=None,
+        decode_full_attention_steps=0,
+        auto_tune=True,
+        auto_tune_max_blocks=64,
+        auto_tune_decode_warmup_steps=1,
+    )
+    block_tables = torch.arange(157, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([157 * 128], dtype=torch.int32)
+
+    pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables.shape == (1, 64)
+    assert new_lens.tolist() == [64 * 128]
+    assert new_lens_list == [64 * 128]
+
+
+def test_h2o_pruner_auto_tune_respects_explicit_fixed_budget():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=24,
+        recent_blocks=24,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.0,
+        auto_tune=True,
+        auto_tune_max_blocks=64,
+        auto_tune_decode_warmup_steps=0,
+    )
+    block_tables = torch.arange(157, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([157 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables.shape == (1, 64)
+    assert new_tables[0, :48].tolist()[-1] == 156
+    assert new_lens.tolist() == [48 * 128]
+    assert new_lens_list == [48 * 128]
 
 
 def test_h2o_pruner_auto_tune_pads_compact_metadata_to_stable_width():
