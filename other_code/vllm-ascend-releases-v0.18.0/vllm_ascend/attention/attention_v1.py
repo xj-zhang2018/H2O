@@ -17,6 +17,8 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import os
+import time
 
 import torch
 import torch_npu
@@ -63,6 +65,73 @@ from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+_H2O_ATTENTION_UPDATE_TIMING_STEP = 0
+
+
+def _get_h2o_debug_timing_config():
+    try:
+        h2o_config = get_ascend_config().h2o_config
+    except RuntimeError:
+        return None
+    if h2o_config.enabled and getattr(h2o_config, "debug_timing", False):
+        return h2o_config
+    return None
+
+
+def _h2o_debug_timing_now(h2o_config) -> float:
+    if getattr(h2o_config, "debug_timing_sync", False):
+        try:
+            torch.npu.synchronize()
+        except Exception:  # pragma: no cover - diagnostic-only best effort
+            pass
+    return time.perf_counter()
+
+
+def _first_attention_metadata_shape(attn_metadata):
+    if not attn_metadata:
+        return None, None
+    if isinstance(attn_metadata, list):
+        if not attn_metadata or not attn_metadata[0]:
+            return None, None
+        metadata = next(iter(attn_metadata[0].values()))
+    else:
+        metadata = next(iter(attn_metadata.values()))
+    block_tables = getattr(metadata, "block_tables", None)
+    seq_lens = getattr(metadata, "seq_lens", None)
+    block_shape = tuple(block_tables.shape) if block_tables is not None else None
+    seq_lens_shape = tuple(seq_lens.shape) if hasattr(seq_lens, "shape") else None
+    return block_shape, seq_lens_shape
+
+
+def _log_h2o_attention_update_timing(
+    h2o_config,
+    *,
+    path: str,
+    num_tokens: int,
+    layer_updates: int,
+    elapsed_ms: float,
+    attn_metadata,
+) -> None:
+    global _H2O_ATTENTION_UPDATE_TIMING_STEP
+    _H2O_ATTENTION_UPDATE_TIMING_STEP += 1
+    interval = getattr(h2o_config, "debug_interval", 1)
+    if _H2O_ATTENTION_UPDATE_TIMING_STEP != 1 and _H2O_ATTENTION_UPDATE_TIMING_STEP % interval != 0:
+        return
+    block_shape, seq_lens_shape = _first_attention_metadata_shape(attn_metadata)
+    rank = os.getenv("RANK", os.getenv("LOCAL_RANK", "unknown"))
+    logger.info(
+        "[H2O][rank=%s] attention graph update timing: step=%d path=%s "
+        "num_tokens=%d layer_updates=%d elapsed_ms=%.3f "
+        "block_table_shape=%s seq_lens_shape=%s",
+        rank,
+        _H2O_ATTENTION_UPDATE_TIMING_STEP,
+        path,
+        num_tokens,
+        layer_updates,
+        elapsed_ms,
+        block_shape,
+        seq_lens_shape,
+    )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -503,12 +572,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
+        h2o_timing_config = _get_h2o_debug_timing_config()
+        h2o_timing_started = _h2o_debug_timing_now(h2o_timing_config) if h2o_timing_config is not None else 0.0
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
                 graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
+            layer_updates = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
@@ -556,6 +628,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     )
                     torch.npu.graph_task_update_end(update_stream)
                     event.record(update_stream)
+                    layer_updates += 1
+            if h2o_timing_config is not None:
+                elapsed_ms = (_h2o_debug_timing_now(h2o_timing_config) - h2o_timing_started) * 1000.0
+                _log_h2o_attention_update_timing(
+                    h2o_timing_config,
+                    path="paged_attention",
+                    num_tokens=num_tokens,
+                    layer_updates=layer_updates,
+                    elapsed_ms=elapsed_ms,
+                    attn_metadata=forward_context.attn_metadata,
+                )
         else:
             # FIA update logic
             if _EXTRA_CTX.is_draft_model:
@@ -579,6 +662,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             attn_count = 0
+            layer_updates = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
@@ -634,6 +718,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     torch.npu.graph_task_update_end(update_stream)
 
                     event.record(update_stream)
+                    layer_updates += 1
+            if h2o_timing_config is not None:
+                elapsed_ms = (_h2o_debug_timing_now(h2o_timing_config) - h2o_timing_started) * 1000.0
+                _log_h2o_attention_update_timing(
+                    h2o_timing_config,
+                    path="fused_infer_attention",
+                    num_tokens=num_tokens,
+                    layer_updates=layer_updates,
+                    elapsed_ms=elapsed_ms,
+                    attn_metadata=attn_metadata,
+                )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)

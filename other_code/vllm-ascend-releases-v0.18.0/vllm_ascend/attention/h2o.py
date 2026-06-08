@@ -16,6 +16,7 @@
 
 import math
 import os
+import time
 from typing import Any, Sequence
 
 import torch
@@ -41,7 +42,9 @@ class H2OBlockPruner:
         self._compact_metadata_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
         self._compact_block_table_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
         self._debug_step = 0
+        self._debug_timing_step = 0
         self._debug_seen_pruned = False
+        self._debug_timing_seen_changed = False
 
     def apply(
         self,
@@ -65,9 +68,15 @@ class H2OBlockPruner:
         if block_size <= 0:
             return block_tables, seq_lens, resolved_seq_lens
 
+        debug_timing = bool(getattr(config, "debug_timing", False))
+        timings: dict[str, float] | None = {} if debug_timing else None
+        timing_started = self._debug_timing_now(config) if debug_timing else 0.0
+        selection_cache_hits = 0
+        selection_cache_misses = 0
         valid_block_counts = [
             math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in resolved_seq_lens
         ]
+        timing_started = self._record_debug_timing(timings, config, "prepare", timing_started)
         if self._can_keep_original_metadata(
             resolved_seq_lens,
             valid_block_counts,
@@ -75,6 +84,21 @@ class H2OBlockPruner:
             request_ids,
         ):
             self._advance_warmup_decode_steps(resolved_seq_lens, valid_block_counts, config, request_ids)
+            self._record_debug_timing(timings, config, "keep_original", timing_started)
+            total_original_blocks = sum(valid_block_counts)
+            self._log_debug_timing_summary(
+                config,
+                block_size,
+                len(resolved_seq_lens),
+                total_original_blocks,
+                total_original_blocks,
+                False,
+                block_tables.shape[1],
+                block_tables.shape[1],
+                selection_cache_hits,
+                selection_cache_misses,
+                timings,
+            )
             return block_tables, seq_lens, resolved_seq_lens
 
         changed = False
@@ -209,6 +233,7 @@ class H2OBlockPruner:
             ))
             changed = True
 
+        timing_started = self._record_debug_timing(timings, config, "plan", timing_started)
         if not changed:
             if debug_log:
                 self._log_debug_summary(
@@ -220,6 +245,19 @@ class H2OBlockPruner:
                     changed,
                     sample_requests,
                 )
+            self._log_debug_timing_summary(
+                config,
+                block_size,
+                len(resolved_seq_lens),
+                total_original_blocks,
+                total_kept_blocks,
+                changed,
+                block_tables.shape[1],
+                block_tables.shape[1],
+                selection_cache_hits,
+                selection_cache_misses,
+                timings,
+            )
             return block_tables, seq_lens, resolved_seq_lens
         planned_row_lengths = self._planned_selected_row_lengths(
             selected_block_rows,
@@ -237,6 +275,7 @@ class H2OBlockPruner:
             block_tables.shape[1],
             config,
         )
+        timing_started = self._record_debug_timing(timings, config, "guard", timing_started)
         if not has_budget_savings or not has_metadata_shape_savings:
             skip_updates = list(score_updates)
             skip_updates.extend(
@@ -267,6 +306,23 @@ class H2OBlockPruner:
                     False,
                     sample_requests,
                 )
+            self._log_debug_timing_summary(
+                config,
+                block_size,
+                len(resolved_seq_lens),
+                total_original_blocks,
+                planned_kept_blocks,
+                False,
+                self._resolve_compact_metadata_width(
+                    max(planned_row_lengths, default=1),
+                    block_tables.shape[1],
+                    config,
+                ),
+                block_tables.shape[1],
+                selection_cache_hits,
+                selection_cache_misses,
+                timings,
+            )
             return block_tables, seq_lens, original_seq_lens
 
         for row_pos, req_index, seq_len, valid_blocks, heavy_blocks, recent_blocks in prune_candidates:
@@ -279,6 +335,10 @@ class H2OBlockPruner:
                 config,
                 request_ids,
             )
+            if cache_hit:
+                selection_cache_hits += 1
+            else:
+                selection_cache_misses += 1
             compact_len = self._selected_token_count(selected, seq_len, valid_blocks, block_size)
             selected_block_rows[row_pos] = selected
             resolved_seq_lens[req_index] = compact_len
@@ -297,6 +357,7 @@ class H2OBlockPruner:
                     "pruned",
                 )
 
+        timing_started = self._record_debug_timing(timings, config, "select", timing_started)
         if debug_log:
             self._log_debug_summary(
                 config,
@@ -309,13 +370,14 @@ class H2OBlockPruner:
             )
 
         self._apply_score_updates(score_updates, config, request_ids)
+        timing_started = self._record_debug_timing(timings, config, "score_update", timing_started)
         compact_rows = [row if row is not None else (0,) for row in selected_block_rows]
         source_cache_key = self._compact_block_table_source_key(
             block_tables,
             valid_block_counts,
             request_ids,
         )
-        return self._build_compact_metadata(
+        new_block_tables, new_seq_lens, new_seq_lens_list = self._build_compact_metadata(
             block_tables,
             seq_lens,
             compact_rows,
@@ -323,6 +385,21 @@ class H2OBlockPruner:
             config,
             source_cache_key,
         )
+        self._record_debug_timing(timings, config, "build_metadata", timing_started)
+        self._log_debug_timing_summary(
+            config,
+            block_size,
+            len(resolved_seq_lens),
+            total_original_blocks,
+            total_kept_blocks,
+            changed,
+            new_block_tables.shape[1],
+            block_tables.shape[1],
+            selection_cache_hits,
+            selection_cache_misses,
+            timings,
+        )
+        return new_block_tables, new_seq_lens, new_seq_lens_list
 
     def build_graph_capture_metadata(
         self,
@@ -672,6 +749,77 @@ class H2OBlockPruner:
             pruned_blocks,
             keep_ratio,
             "; ".join(sample_requests) if sample_requests else "[]",
+        )
+
+    @staticmethod
+    def _debug_timing_now(config: Any) -> float:
+        if getattr(config, "debug_timing_sync", False):
+            try:
+                torch.npu.synchronize()
+            except Exception:  # pragma: no cover - diagnostic-only best effort
+                pass
+        return time.perf_counter()
+
+    @classmethod
+    def _record_debug_timing(
+        cls,
+        timings: dict[str, float] | None,
+        config: Any,
+        name: str,
+        started_at: float,
+    ) -> float:
+        if timings is None:
+            return started_at
+        now = cls._debug_timing_now(config)
+        timings[name] = timings.get(name, 0.0) + (now - started_at) * 1000.0
+        return now
+
+    def _log_debug_timing_summary(
+        self,
+        config: Any,
+        block_size: int,
+        batch_size: int,
+        total_original_blocks: int,
+        total_kept_blocks: int,
+        changed: bool,
+        metadata_width: int,
+        block_table_width: int,
+        selection_cache_hits: int,
+        selection_cache_misses: int,
+        timings: dict[str, float] | None,
+    ) -> None:
+        if timings is None:
+            return
+        self._debug_timing_step += 1
+        interval = getattr(config, "debug_interval", 1)
+        should_log = self._debug_timing_step == 1 or self._debug_timing_step % interval == 0
+        if changed and not self._debug_timing_seen_changed:
+            should_log = True
+            self._debug_timing_seen_changed = True
+        if not should_log:
+            return
+
+        rank = os.getenv("RANK", os.getenv("LOCAL_RANK", "unknown"))
+        timing_text = ", ".join(f"{name}={value:.3f}" for name, value in timings.items())
+        pruned_blocks = max(total_original_blocks - total_kept_blocks, 0)
+        logger.info(
+            "[H2O][rank=%s] decode timing: step=%d batch=%d block_size=%d "
+            "changed=%s original_blocks=%d kept_blocks=%d pruned_blocks=%d "
+            "metadata_width=%d/%d selection_cache_hits=%d selection_cache_misses=%d "
+            "phase_ms={%s}",
+            rank,
+            self._debug_timing_step,
+            batch_size,
+            block_size,
+            changed,
+            total_original_blocks,
+            total_kept_blocks,
+            pruned_blocks,
+            metadata_width,
+            block_table_width,
+            selection_cache_hits,
+            selection_cache_misses,
+            timing_text,
         )
 
     def _append_debug_sample(

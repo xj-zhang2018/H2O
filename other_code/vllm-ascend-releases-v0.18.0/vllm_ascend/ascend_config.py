@@ -413,6 +413,8 @@ class H2OConfig:
         self.debug_log = bool(h2o_config.get("debug_log", False))
         self.debug_interval = int(h2o_config.get("debug_interval", 1))
         self.debug_sample_requests = int(h2o_config.get("debug_sample_requests", 3))
+        self.debug_timing = bool(h2o_config.get("debug_timing", False))
+        self.debug_timing_sync = bool(h2o_config.get("debug_timing_sync", False))
 
         self._validate()
         if self.enabled:
@@ -441,7 +443,9 @@ class H2OConfig:
                 f"selection_refresh_interval={self.selection_refresh_interval}, "
                 f"score_update_on_cache_hit={self.score_update_on_cache_hit}, "
                 f"debug_log={self.debug_log}, "
-                f"debug_interval={self.debug_interval}."
+                f"debug_interval={self.debug_interval}, "
+                f"debug_timing={self.debug_timing}, "
+                f"debug_timing_sync={self.debug_timing_sync}."
             )
 
     @staticmethod

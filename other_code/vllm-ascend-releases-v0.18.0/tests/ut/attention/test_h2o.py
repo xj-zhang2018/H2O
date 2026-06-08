@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 
@@ -38,6 +39,8 @@ class H2OConfigStub:
     debug_log: bool = False
     debug_interval: int = 1
     debug_sample_requests: int = 3
+    debug_timing: bool = False
+    debug_timing_sync: bool = False
 
 
 def test_h2o_pruner_keeps_heavy_and_recent_blocks():
@@ -1174,3 +1177,30 @@ def test_h2o_pruner_recent_blocks_build_stronger_score_proxy():
     scores = pruner._scores["req-0"]
     assert scores[0] > scores[2]
     assert scores[9] > scores[7] > scores[2]
+
+
+def test_h2o_pruner_debug_timing_logs_phase_summary():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_blocks=1,
+        recent_blocks=1,
+        adaptive_budget=False,
+        debug_timing=True,
+    )
+    block_tables = torch.tensor([[10, 11, 12, 13, 14, 0]], dtype=torch.int32)
+    seq_lens = torch.tensor([5 * 128], dtype=torch.int32)
+
+    with patch("vllm_ascend.attention.h2o.logger") as mock_logger:
+        new_tables, new_lens, new_lens_list = pruner.apply(
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            block_size=128,
+            config=config,
+            request_ids=["req-0"],
+        )
+
+    assert new_tables[0, :2].tolist() == [10, 14]
+    assert new_lens.tolist() == [2 * 128]
+    assert new_lens_list == [2 * 128]
+    assert mock_logger.info.called
+    assert "decode timing" in mock_logger.info.call_args[0][0]

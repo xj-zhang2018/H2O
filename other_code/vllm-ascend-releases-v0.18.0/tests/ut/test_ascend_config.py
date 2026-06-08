@@ -41,6 +41,8 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertFalse(ascend_config.h2o_config.enabled)
         self.assertFalse(ascend_config.h2o_config.debug_log)
+        self.assertFalse(ascend_config.h2o_config.debug_timing)
+        self.assertFalse(ascend_config.h2o_config.debug_timing_sync)
         self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 0)
         self.assertIsNone(ascend_config.h2o_config.max_prune_seq_len)
 
@@ -85,6 +87,8 @@ class TestAscendConfig(TestBase):
                 "selection_refresh_interval": 8,
                 "debug_log": True,
                 "debug_interval": 16,
+                "debug_timing": True,
+                "debug_timing_sync": True,
             },
             "refresh": True,
             "enable_kv_nz": False,
@@ -119,6 +123,8 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.h2o_config.selection_refresh_interval, 8)
         self.assertTrue(ascend_config.h2o_config.debug_log)
         self.assertEqual(ascend_config.h2o_config.debug_interval, 16)
+        self.assertTrue(ascend_config.h2o_config.debug_timing)
+        self.assertTrue(ascend_config.h2o_config.debug_timing_sync)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
 

@@ -101,6 +101,8 @@ This option applies to full-attention decode. Sliding-window and ALiBi models ke
 | `debug_log` | bool | `False` | Whether to log H2O pruning summaries for debugging. Keep this disabled for performance tests. |
 | `debug_interval` | int | `1` | Print one debug summary every N decode metadata builds when `debug_log` is enabled. |
 | `debug_sample_requests` | int | `3` | Number of sampled requests to include in each debug summary. |
+| `debug_timing` | bool | `False` | Whether to log H2O timing summaries for metadata planning, block selection, compact metadata construction, and attention graph updates. Keep this disabled for normal performance tests. |
+| `debug_timing_sync` | bool | `False` | Whether to synchronize the NPU before timing checkpoints. Enable only for short diagnostic runs because synchronization changes latency. |
 
 Example:
 
@@ -130,7 +132,9 @@ Example:
         "selection_refresh_interval": 4,
         "score_update_on_cache_hit": False,
         "debug_log": False,
-        "debug_interval": 50
+        "debug_interval": 50,
+        "debug_timing": False,
+        "debug_timing_sync": False
     }
 }
 ```
@@ -146,9 +150,26 @@ vllm serve /path/to/model \
   --max-model-len 40960 \
   --max-num-seqs 32 \
   --block-size 128 \
-  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false}}' \
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":false,"debug_timing":false,"debug_timing_sync":false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
 ```
+
+For a short 20k/32k latency diagnosis, keep the same service command but enable timing summaries and use a sparse interval:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+VLLM_USE_V1=1 \
+vllm serve /path/to/model \
+  --served-model-name h2o-model \
+  --tensor-parallel-size 8 \
+  --max-model-len 40960 \
+  --max-num-seqs 32 \
+  --block-size 128 \
+  --additional-config='{"h2o_config":{"enabled":true,"heavy_blocks":24,"recent_blocks":24,"max_blocks":32,"min_seq_len":4096,"adaptive_min_keep_ratio":0.0,"adaptive_precision_ratio":0.0,"adaptive_precision_max_blocks":null,"min_prune_ratio":0.50,"min_metadata_prune_ratio":0.05,"history_cluster_size":2,"sink_blocks":8,"anchor_ratio":0.25,"score_explore_ratio":0.25,"score_coverage_ratio":0.50,"decode_full_attention_steps":0,"decode_budget_fast_blocks":32,"decode_budget_fast_ratio":0.25,"decode_budget_fast_max_blocks":64,"decode_budget_taper_steps":0,"decode_budget_taper_start_step":0,"selection_refresh_interval":128,"score_update_on_cache_hit":false,"debug_log":true,"debug_interval":50,"debug_timing":true,"debug_timing_sync":false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,12,16,32,64]}'
+```
+
+If asynchronous timing does not identify the bottleneck, repeat a much shorter run with `"debug_timing_sync":true` to measure synchronized NPU wall time. Do not compare that synchronized run directly against throughput benchmarks.
 
 **finegrained_tp_config**
 
