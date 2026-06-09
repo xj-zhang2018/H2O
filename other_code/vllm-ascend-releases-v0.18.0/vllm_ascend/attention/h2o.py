@@ -16,10 +16,13 @@
 
 import math
 import os
+import time
 from typing import Any, Sequence
 
 import torch
 from vllm.logger import logger
+
+_H2O_PROF_LOG = os.getenv("VLLM_H2O_PROF_LOG", "0") == "1"
 
 
 class H2OBlockPruner:
@@ -52,8 +55,12 @@ class H2OBlockPruner:
         request_ids: Sequence[Any] | None = None,
         seq_lens_list: Sequence[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        _t_apply_start = time.perf_counter() if _H2O_PROF_LOG else 0.0
         if seq_lens_list is None:
+            _t_sync_start = time.perf_counter() if _H2O_PROF_LOG else 0.0
             resolved_seq_lens = [] if seq_lens is None else [int(x) for x in seq_lens.tolist()]
+            if _H2O_PROF_LOG:
+                logger.info("[H2O-PROF] seq_lens.tolist(): %.3fms", (time.perf_counter() - _t_sync_start) * 1000)
         else:
             resolved_seq_lens = [int(x) for x in seq_lens_list]
         original_seq_lens = list(resolved_seq_lens)
@@ -67,15 +74,22 @@ class H2OBlockPruner:
         valid_block_counts = [
             math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in resolved_seq_lens
         ]
+        _t_check_start = time.perf_counter() if _H2O_PROF_LOG else 0.0
         if self._can_keep_original_metadata_and_advance(
             resolved_seq_lens,
             valid_block_counts,
             config,
             request_ids,
         ):
+            if _H2O_PROF_LOG:
+                logger.info("[H2O-PROF] can_keep_original: %.3fms (no pruning needed)",
+                            (time.perf_counter() - _t_check_start) * 1000)
+                logger.info("[H2O-PROF] apply() total: %.3fms (no pruning)",
+                            (time.perf_counter() - _t_apply_start) * 1000)
             return block_tables, seq_lens, resolved_seq_lens
 
         changed = False
+        _t_select_start = time.perf_counter() if _H2O_PROF_LOG else 0.0
         debug_log = bool(getattr(config, "debug_log", False))
         total_original_blocks = 0
         total_kept_blocks = 0
@@ -267,8 +281,18 @@ class H2OBlockPruner:
             )
 
         self._apply_score_updates(score_updates, config, request_ids)
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] select_blocks+score_update: %.3fms",
+                        (time.perf_counter() - _t_select_start) * 1000)
         compact_rows = [row if row is not None else (0,) for row in selected_block_rows]
-        return self._build_compact_metadata(block_tables, seq_lens, compact_rows, resolved_seq_lens, config)
+        _t_build_start = time.perf_counter() if _H2O_PROF_LOG else 0.0
+        result = self._build_compact_metadata(block_tables, seq_lens, compact_rows, resolved_seq_lens, config)
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] build_compact_metadata: %.3fms",
+                        (time.perf_counter() - _t_build_start) * 1000)
+            logger.info("[H2O-PROF] apply() total: %.3fms (pruning active)",
+                        (time.perf_counter() - _t_apply_start) * 1000)
+        return result
 
     def _can_keep_original_metadata_and_advance(
         self,
