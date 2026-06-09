@@ -67,13 +67,12 @@ class H2OBlockPruner:
         valid_block_counts = [
             math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in resolved_seq_lens
         ]
-        if self._can_keep_original_metadata(
+        if self._can_keep_original_metadata_and_advance(
             resolved_seq_lens,
             valid_block_counts,
             config,
             request_ids,
         ):
-            self._advance_warmup_decode_steps(resolved_seq_lens, valid_block_counts, config, request_ids)
             return block_tables, seq_lens, resolved_seq_lens
 
         changed = False
@@ -271,7 +270,7 @@ class H2OBlockPruner:
         compact_rows = [row if row is not None else (0,) for row in selected_block_rows]
         return self._build_compact_metadata(block_tables, seq_lens, compact_rows, resolved_seq_lens, config)
 
-    def _can_keep_original_metadata(
+    def _can_keep_original_metadata_and_advance(
         self,
         seq_lens: Sequence[int],
         valid_block_counts: Sequence[int],
@@ -280,6 +279,7 @@ class H2OBlockPruner:
     ) -> bool:
         if not seq_lens:
             return True
+        can_keep = True
         for req_index, (seq_len, valid_blocks) in enumerate(zip(seq_lens, valid_block_counts)):
             if seq_len <= 0:
                 continue
@@ -288,24 +288,10 @@ class H2OBlockPruner:
             if H2OBlockPruner._should_keep_full_context(valid_blocks, config):
                 continue
             if self._should_keep_full_decode_step(req_index, config, request_ids):
-                continue
-            return False
-        return True
-
-    def _advance_warmup_decode_steps(
-        self,
-        seq_lens: Sequence[int],
-        valid_block_counts: Sequence[int],
-        config: Any,
-        request_ids: Sequence[Any] | None,
-    ) -> None:
-        for req_index, (seq_len, valid_blocks) in enumerate(zip(seq_lens, valid_block_counts)):
-            if seq_len <= 0 or seq_len < config.min_seq_len:
-                continue
-            if self._should_keep_full_context(valid_blocks, config):
-                continue
-            if self._should_keep_full_decode_step(req_index, config, request_ids):
                 self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
+                continue
+            can_keep = False
+        return can_keep
 
     def _apply_score_updates(
         self,
