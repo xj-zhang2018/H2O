@@ -345,7 +345,7 @@ class H2OBlockPruner:
         for req_index, seq_len, valid_blocks, _, _ in score_updates:
             self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
 
-def _build_compact_metadata(
+    def _build_compact_metadata(
         self,
         block_tables: torch.Tensor,
         seq_lens: torch.Tensor,
