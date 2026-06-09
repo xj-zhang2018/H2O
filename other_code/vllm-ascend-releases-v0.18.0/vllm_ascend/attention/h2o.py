@@ -42,6 +42,14 @@ class H2OBlockPruner:
         self._decode_steps: dict[Any, int] = {}
         self._selection_cache: dict[Any, tuple[tuple[Any, ...], tuple[int, ...]]] = {}
         self._compact_metadata_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
+        self._gather_buffer: torch.Tensor | None = None
+        self._gather_buffer_device: str | None = None
+        self._gather_buffer_batch: int = 0
+        self._gather_buffer_width: int = 0
+        self._seq_lens_buffer: torch.Tensor | None = None
+        self._seq_lens_buffer_device: str | None = None
+        self._seq_lens_buffer_len: int = 0
+        self._last_metadata_width: int | None = None
         self._debug_step = 0
         self._debug_seen_pruned = False
 
@@ -337,7 +345,7 @@ class H2OBlockPruner:
         for req_index, seq_len, valid_blocks, _, _ in score_updates:
             self._touch_decode_step(req_index, seq_len, valid_blocks, request_ids)
 
-    def _build_compact_metadata(
+def _build_compact_metadata(
         self,
         block_tables: torch.Tensor,
         seq_lens: torch.Tensor,
@@ -352,33 +360,93 @@ class H2OBlockPruner:
             block_tables.shape[1],
             config,
         )
-        selected_rows = tuple(tuple(row) if row else (0,) for row in selected_block_rows)
-        cache_key = (str(block_tables.device), block_tables.shape[0], block_tables.shape[1], metadata_width,
-                     selected_rows)
-        cached = self._compact_metadata_cache
-        if cached is not None and cached[0] == cache_key:
-            gather_indices = cached[1]
-        else:
-            gather_rows = []
-            for selected in selected_rows:
-                row = list(selected)
-                if len(row) < metadata_width:
-                    row = row + [0] * (metadata_width - len(row))
-                gather_rows.append(row)
 
-            gather_indices = torch.as_tensor(
-                gather_rows,
-                dtype=torch.long,
-                device=block_tables.device,
-            )
-            self._compact_metadata_cache = (cache_key, gather_indices)
-        new_block_tables = block_tables.gather(1, gather_indices)
-        compact_seq_lens_list = [int(seq_len) for seq_len in compact_seq_lens]
-        new_seq_lens = torch.tensor(
-            compact_seq_lens_list,
-            dtype=seq_lens.dtype,
-            device=seq_lens.device,
+        batch_size = block_tables.shape[0]
+        device = block_tables.device
+        device_str = str(device)
+
+        _t_cpu_gather = time.perf_counter() if _H2O_PROF_LOG else 0.0
+        gather_rows = []
+        for row in selected_block_rows:
+            padded = list(row) if row else [0]
+            if len(padded) < metadata_width:
+                padded = padded + [0] * (metadata_width - len(padded))
+            gather_rows.append(padded)
+        cpu_gather = torch.tensor(gather_rows, dtype=torch.long)
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] build_cpu_gather: %.3fms (shape=%s)",
+                        (time.perf_counter() - _t_cpu_gather) * 1000, str(cpu_gather.shape))
+
+        _t_npu_copy_gather = time.perf_counter() if _H2O_PROF_LOG else 0.0
+        need_realloc_gather = (
+            self._gather_buffer is None
+            or self._gather_buffer_device != device_str
+            or self._gather_buffer_batch < batch_size
+            or self._gather_buffer_width < metadata_width
         )
+        if need_realloc_gather:
+            self._gather_buffer = torch.empty(
+                batch_size, metadata_width, dtype=torch.long, device=device,
+            )
+            self._gather_buffer_device = device_str
+            self._gather_buffer_batch = batch_size
+            self._gather_buffer_width = metadata_width
+            if _H2O_PROF_LOG:
+                logger.info("[H2O-PROF] gather_buffer realloc: %.3fms (new shape=%s)",
+                            (time.perf_counter() - _t_npu_copy_gather) * 1000,
+                            f"({batch_size},{metadata_width})")
+                _t_npu_copy_gather = time.perf_counter()
+
+        buf_slice = self._gather_buffer[:batch_size, :metadata_width]
+        buf_slice.copy_(cpu_gather)
+        gather_indices = buf_slice.contiguous()
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] gather_buffer copy_to_npu: %.3fms",
+                        (time.perf_counter() - _t_npu_copy_gather) * 1000)
+
+        selected_rows = tuple(tuple(row) if row else (0,) for row in selected_block_rows)
+        cache_key = (device_str, batch_size, block_tables.shape[1], metadata_width, selected_rows)
+        self._compact_metadata_cache = (cache_key, gather_indices)
+
+        _t_gather_op = time.perf_counter() if _H2O_PROF_LOG else 0.0
+        new_block_tables = block_tables.gather(1, gather_indices)
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] block_tables.gather: %.3fms",
+                        (time.perf_counter() - _t_gather_op) * 1000)
+
+        compact_seq_lens_list = [int(seq_len) for seq_len in compact_seq_lens]
+
+        _t_seq_lens_npu = time.perf_counter() if _H2O_PROF_LOG else 0.0
+        need_realloc_seq = (
+            self._seq_lens_buffer is None
+            or self._seq_lens_buffer_device != device_str
+            or self._seq_lens_buffer_len < len(compact_seq_lens_list)
+        )
+        if need_realloc_seq:
+            self._seq_lens_buffer = torch.empty(
+                len(compact_seq_lens_list), dtype=seq_lens.dtype, device=device,
+            )
+            self._seq_lens_buffer_device = device_str
+            self._seq_lens_buffer_len = len(compact_seq_lens_list)
+
+        cpu_seq = torch.tensor(compact_seq_lens_list, dtype=seq_lens.dtype)
+        self._seq_lens_buffer[:len(compact_seq_lens_list)].copy_(cpu_seq)
+        new_seq_lens = self._seq_lens_buffer[:len(compact_seq_lens_list)].contiguous()
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] seq_lens copy_to_npu: %.3fms",
+                        (time.perf_counter() - _t_seq_lens_npu) * 1000)
+
+        prev_metadata_width = self._last_metadata_width
+        width_changed = (
+            prev_metadata_width is not None
+            and prev_metadata_width != metadata_width
+        )
+        self._last_metadata_width = metadata_width
+        if width_changed and _H2O_PROF_LOG:
+            logger.info("[H2O-PROF] WARNING: metadata_width changed from %d to %d "
+                        "- may trigger ACLGraph recapture",
+                        prev_metadata_width, metadata_width)
+
         return new_block_tables, new_seq_lens, compact_seq_lens_list
 
     @staticmethod
