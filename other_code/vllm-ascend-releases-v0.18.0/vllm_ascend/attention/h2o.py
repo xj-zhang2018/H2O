@@ -87,6 +87,24 @@ class H2OBlockPruner:
             config,
             request_ids,
         ):
+            compact_width = self._resolve_compact_metadata_width(
+                max(valid_block_counts) if valid_block_counts else 1,
+                block_tables.shape[1],
+                config,
+            )
+            if compact_width < block_tables.shape[1]:
+                full_selection_rows = []
+                for v in valid_block_counts:
+                    full_selection_rows.append(list(range(v)) if v > 0 else [0])
+                result = self._build_compact_metadata(
+                    block_tables, seq_lens, full_selection_rows, resolved_seq_lens, config,
+                )
+                if _H2O_PROF_LOG:
+                    logger.info("[H2O-PROF] can_keep_original but compact_width=%d < %d: compact metadata applied",
+                                compact_width, block_tables.shape[1])
+                    logger.info("[H2O-PROF] apply() total: %.3fms (compact only, no pruning)",
+                                (time.perf_counter() - _t_apply_start) * 1000)
+                return result
             if _H2O_PROF_LOG:
                 logger.info("[H2O-PROF] can_keep_original: %.3fms (no pruning needed)",
                             (time.perf_counter() - _t_check_start) * 1000)
