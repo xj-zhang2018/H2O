@@ -41,11 +41,12 @@ class H2OBlockPruner:
         self._last_seq_lens: dict[Any, int] = {}
         self._decode_steps: dict[Any, int] = {}
         self._selection_cache: dict[Any, tuple[tuple[Any, ...], tuple[int, ...]]] = {}
-        self._compact_metadata_cache: tuple[tuple[Any, ...], torch.Tensor, torch.Tensor] | None = None
+        self._gather_indices_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
         self._gather_buffer: torch.Tensor | None = None
         self._gather_buffer_device: str | None = None
         self._seq_lens_buffer: torch.Tensor | None = None
         self._seq_lens_buffer_device: str | None = None
+        self._seq_lens_incr_count: int = 0
         self._last_metadata_width: int | None = None
         self._debug_step = 0
         self._debug_seen_pruned = False
@@ -363,13 +364,12 @@ class H2OBlockPruner:
         device_str = str(device)
 
         selected_rows = tuple(tuple(row) if row else (0,) for row in selected_block_rows)
-        compact_seq_lens_tuple = tuple(compact_seq_lens)
-        cache_key = (device_str, batch_size, block_tables.shape[1], metadata_width, selected_rows, compact_seq_lens_tuple)
-        cached = self._compact_metadata_cache
-        if cached is not None and cached[0] == cache_key:
-            gather_indices, new_seq_lens = cached[1], cached[2]
+        gather_cache_key = (device_str, batch_size, block_tables.shape[1], metadata_width, selected_rows)
+        gather_cached = self._gather_indices_cache
+        if gather_cached is not None and gather_cached[0] == gather_cache_key:
+            gather_indices = gather_cached[1]
             if _H2O_PROF_LOG:
-                logger.info("[H2O-PROF] build_compact_metadata: full_cache_hit (gather+seq_lens) 0ms")
+                logger.info("[H2O-PROF] gather_indices: cache_hit 0ms")
         else:
             _t_cpu_gather = time.perf_counter() if _H2O_PROF_LOG else 0.0
             gather_rows = []
@@ -406,6 +406,8 @@ class H2OBlockPruner:
             if _H2O_PROF_LOG:
                 logger.info("[H2O-PROF] gather_buffer copy_: %.3fms",
                             (time.perf_counter() - _t_npu_copy) * 1000)
+            self._gather_indices_cache = (gather_cache_key, gather_indices)
+            self._seq_lens_incr_count = 0
 
         _t_gather_op = time.perf_counter() if _H2O_PROF_LOG else 0.0
         new_block_tables = block_tables.gather(1, gather_indices)
@@ -413,30 +415,35 @@ class H2OBlockPruner:
             logger.info("[H2O-PROF] block_tables.gather: %.3fms",
                         (time.perf_counter() - _t_gather_op) * 1000)
 
-        compact_seq_lens_list = list(compact_seq_lens_tuple)
+        compact_seq_lens_list = [int(seq_len) for seq_len in compact_seq_lens]
 
-        if cached is not None and cached[0] == cache_key:
-            pass
-        else:
-            _t_seq_lens = time.perf_counter() if _H2O_PROF_LOG else 0.0
-            need_realloc_seq = (
-                self._seq_lens_buffer is None
-                or self._seq_lens_buffer_device != device_str
-                or self._seq_lens_buffer.shape[0] != len(compact_seq_lens_list)
+        _t_seq_lens = time.perf_counter() if _H2O_PROF_LOG else 0.0
+        need_realloc_seq = (
+            self._seq_lens_buffer is None
+            or self._seq_lens_buffer_device != device_str
+            or self._seq_lens_buffer.shape[0] != len(compact_seq_lens_list)
+        )
+        if need_realloc_seq:
+            self._seq_lens_buffer = torch.empty(
+                len(compact_seq_lens_list), dtype=seq_lens.dtype, device=device,
             )
-            if need_realloc_seq:
-                self._seq_lens_buffer = torch.empty(
-                    len(compact_seq_lens_list), dtype=seq_lens.dtype, device=device,
-                )
-                self._seq_lens_buffer_device = device_str
+            self._seq_lens_buffer_device = device_str
+            self._seq_lens_incr_count = 0
 
+        if self._seq_lens_incr_count == 0:
             cpu_seq = torch.tensor(compact_seq_lens_list, dtype=seq_lens.dtype)
             self._seq_lens_buffer.copy_(cpu_seq)
-            new_seq_lens = self._seq_lens_buffer
+            self._seq_lens_incr_count = 1
             if _H2O_PROF_LOG:
-                logger.info("[H2O-PROF] seq_lens copy_: %.3fms",
+                logger.info("[H2O-PROF] seq_lens copy_ (initial): %.3fms",
                             (time.perf_counter() - _t_seq_lens) * 1000)
-            self._compact_metadata_cache = (cache_key, gather_indices, new_seq_lens)
+        else:
+            self._seq_lens_buffer += 1
+            self._seq_lens_incr_count += 1
+            if _H2O_PROF_LOG:
+                logger.info("[H2O-PROF] seq_lens += 1 (in-place): %.3fms, incr_count=%d",
+                            (time.perf_counter() - _t_seq_lens) * 1000, self._seq_lens_incr_count)
+        new_seq_lens = self._seq_lens_buffer
 
         prev_metadata_width = self._last_metadata_width
         width_changed = (
