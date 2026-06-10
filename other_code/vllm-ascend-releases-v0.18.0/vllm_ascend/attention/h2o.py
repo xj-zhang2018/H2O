@@ -80,13 +80,31 @@ class H2OBlockPruner:
         valid_block_counts = [
             math.ceil(seq_len / block_size) if seq_len > 0 else 0 for seq_len in resolved_seq_lens
         ]
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-TTFT-PROF] apply() step=%d: bt_shape=%s, seq_lens=%s, "
+                        "valid_blocks=%s, req_ids=%s, bt_width=%d",
+                        self._debug_step, str(block_tables.shape),
+                        str(resolved_seq_lens)[:50],
+                        str(valid_block_counts)[:50],
+                        str(request_ids)[:30] if request_ids is not None else "None",
+                        block_tables.shape[1])
         _t_check_start = time.perf_counter() if _H2O_PROF_LOG else 0.0
-        if self._can_keep_original_metadata_and_advance(
+        can_keep = self._can_keep_original_metadata_and_advance(
             resolved_seq_lens,
             valid_block_counts,
             config,
             request_ids,
-        ):
+        )
+        compact_width = self._resolve_compact_metadata_width(
+            max(valid_block_counts) if valid_block_counts else 1,
+            block_tables.shape[1],
+            config,
+        )
+        if _H2O_PROF_LOG:
+            logger.info("[H2O-TTFT-PROF] can_keep=%s, compact_width=%d, bt_width=%d, will_compact=%s",
+                        can_keep, compact_width, block_tables.shape[1],
+                        can_keep and compact_width < block_tables.shape[1])
+        if can_keep:
             compact_width = self._resolve_compact_metadata_width(
                 max(valid_block_counts) if valid_block_counts else 1,
                 block_tables.shape[1],

@@ -127,6 +127,8 @@ class ACLGraphWrapper:
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
         if entry.aclgraph is None:
+            import time as _acl_time
+            _t_capture_start = _acl_time.perf_counter()
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -176,6 +178,9 @@ class ACLGraphWrapper:
             # to save memory
             entry.output = weak_ref_tensors(output)
             entry.aclgraph = aclgraph
+            logger.info("[H2O-TTFT-PROF] ACLGraph capture: %.3fms, batch_desc=%s",
+                        (_acl_time.perf_counter() - _t_capture_start) * 1000,
+                        str(batch_descriptor))
 
             compilation_counter.num_cudagraph_captured += 1
 
@@ -194,6 +199,8 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
+        import time as _acl_time2
+        _t_replay_start = _acl_time2.perf_counter()
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.
@@ -207,6 +214,9 @@ class ACLGraphWrapper:
         if not self.enable_enpu and not is_draft_eagle:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
+        logger.info("[H2O-TTFT-PROF] ACLGraph replay: %.3fms, batch_desc=%s",
+                    (_acl_time2.perf_counter() - _t_replay_start) * 1000,
+                    str(batch_descriptor))
         return entry.output
 
 
