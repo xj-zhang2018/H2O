@@ -43,7 +43,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.h2o_config.debug_log)
         self.assertFalse(ascend_config.h2o_config.debug_timing)
         self.assertFalse(ascend_config.h2o_config.debug_timing_sync)
-        self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 0)
+        self.assertEqual(ascend_config.h2o_config.decode_full_attention_steps, 1)
         self.assertIsNone(ascend_config.h2o_config.max_prune_seq_len)
         self.assertTrue(ascend_config.h2o_config.auto_tune)
         self.assertEqual(ascend_config.h2o_config.auto_tune_max_blocks, 64)
@@ -82,6 +82,7 @@ class TestAscendConfig(TestBase):
                 "score_coverage_ratio": 0.4,
                 "min_prune_ratio": 0.25,
                 "history_cluster_size": 2,
+                "decode_full_attention_steps": 0,
                 "decode_budget_fast_blocks": 24,
                 "decode_budget_fast_ratio": 0.42,
                 "decode_budget_fast_max_blocks": 64,

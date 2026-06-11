@@ -66,6 +66,8 @@ from vllm_ascend.utils import weak_ref_tensors
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _H2O_ATTENTION_UPDATE_TIMING_STEP = 0
+_H2O_METADATA_BUILD_TIMING_STEP = 0
+_H2O_GRAPH_CAPTURE_TIMING_STEP = 0
 
 
 def _get_h2o_debug_timing_config():
@@ -87,6 +89,22 @@ def _h2o_debug_timing_now(h2o_config) -> float:
     return time.perf_counter()
 
 
+def _record_h2o_debug_timing(h2o_config, timings: dict[str, float] | None, name: str, started_at: float) -> float:
+    if timings is None:
+        return started_at
+    now = _h2o_debug_timing_now(h2o_config)
+    timings[name] = timings.get(name, 0.0) + (now - started_at) * 1000.0
+    return now
+
+
+def _metadata_tensor_shapes(metadata):
+    block_tables = getattr(metadata, "block_tables", None)
+    seq_lens = getattr(metadata, "seq_lens", None)
+    block_shape = tuple(block_tables.shape) if block_tables is not None else None
+    seq_lens_shape = tuple(seq_lens.shape) if hasattr(seq_lens, "shape") else None
+    return block_shape, seq_lens_shape
+
+
 def _first_attention_metadata_shape(attn_metadata):
     if not attn_metadata:
         return None, None
@@ -96,11 +114,104 @@ def _first_attention_metadata_shape(attn_metadata):
         metadata = next(iter(attn_metadata[0].values()))
     else:
         metadata = next(iter(attn_metadata.values()))
-    block_tables = getattr(metadata, "block_tables", None)
-    seq_lens = getattr(metadata, "seq_lens", None)
-    block_shape = tuple(block_tables.shape) if block_tables is not None else None
-    seq_lens_shape = tuple(seq_lens.shape) if hasattr(seq_lens, "shape") else None
-    return block_shape, seq_lens_shape
+    return _metadata_tensor_shapes(metadata)
+
+
+def _format_h2o_timing_text(timings: dict[str, float] | None) -> str:
+    if not timings:
+        return ""
+    return ", ".join(f"{name}={value:.3f}" for name, value in timings.items())
+
+
+def _should_log_h2o_timing_step(step: int, interval: int) -> bool:
+    return step == 1 or step % interval == 0
+
+
+def _log_h2o_metadata_build_timing(
+    h2o_config,
+    *,
+    path: str,
+    attn_state,
+    num_reqs: int,
+    num_actual_tokens: int,
+    num_prefills: int,
+    num_decodes: int,
+    num_decode_tokens: int,
+    apply_h2o: bool,
+    h2o_changed: bool,
+    before_block_shape,
+    before_seq_lens_shape,
+    after_block_shape,
+    after_seq_lens_shape,
+    timings: dict[str, float] | None,
+) -> None:
+    global _H2O_METADATA_BUILD_TIMING_STEP
+    if timings is None:
+        return
+    _H2O_METADATA_BUILD_TIMING_STEP += 1
+    interval = getattr(h2o_config, "debug_interval", 1)
+    if not _should_log_h2o_timing_step(_H2O_METADATA_BUILD_TIMING_STEP, interval):
+        return
+    rank = os.getenv("RANK", os.getenv("LOCAL_RANK", "unknown"))
+    state_name = getattr(attn_state, "name", str(attn_state))
+    logger.info(
+        "[H2O][rank=%s] metadata build timing: step=%d path=%s state=%s "
+        "num_reqs=%d num_actual_tokens=%d num_prefills=%d num_decodes=%d "
+        "num_decode_tokens=%d apply_h2o=%s h2o_changed=%s "
+        "block_table_shape=%s->%s seq_lens_shape=%s->%s phase_ms={%s}",
+        rank,
+        _H2O_METADATA_BUILD_TIMING_STEP,
+        path,
+        state_name,
+        num_reqs,
+        num_actual_tokens,
+        num_prefills,
+        num_decodes,
+        num_decode_tokens,
+        apply_h2o,
+        h2o_changed,
+        before_block_shape,
+        after_block_shape,
+        before_seq_lens_shape,
+        after_seq_lens_shape,
+        _format_h2o_timing_text(timings),
+    )
+
+
+def _log_h2o_graph_capture_timing(
+    h2o_config,
+    *,
+    attn_state,
+    before_block_shape,
+    before_seq_lens_shape,
+    after_block_shape,
+    after_seq_lens_shape,
+    timings: dict[str, float] | None,
+) -> None:
+    global _H2O_GRAPH_CAPTURE_TIMING_STEP
+    if timings is None:
+        return
+    _H2O_GRAPH_CAPTURE_TIMING_STEP += 1
+    interval = getattr(h2o_config, "debug_interval", 1)
+    if not _should_log_h2o_timing_step(_H2O_GRAPH_CAPTURE_TIMING_STEP, interval):
+        return
+    rank = os.getenv("RANK", os.getenv("LOCAL_RANK", "unknown"))
+    state_name = getattr(attn_state, "name", str(attn_state))
+    changed = before_block_shape != after_block_shape or before_seq_lens_shape != after_seq_lens_shape
+    logger.info(
+        "[H2O][rank=%s] graph capture metadata timing: step=%d state=%s "
+        "h2o_changed=%s block_table_shape=%s->%s seq_lens_shape=%s->%s "
+        "phase_ms={%s}",
+        rank,
+        _H2O_GRAPH_CAPTURE_TIMING_STEP,
+        state_name,
+        changed,
+        before_block_shape,
+        after_block_shape,
+        before_seq_lens_shape,
+        after_seq_lens_shape,
+        _format_h2o_timing_text(timings),
+    )
 
 
 def _log_h2o_attention_update_timing(
@@ -110,6 +221,8 @@ def _log_h2o_attention_update_timing(
     num_tokens: int,
     layer_updates: int,
     elapsed_ms: float,
+    workspace_ms: float,
+    graph_update_ms: float,
     attn_metadata,
 ) -> None:
     global _H2O_ATTENTION_UPDATE_TIMING_STEP
@@ -122,6 +235,7 @@ def _log_h2o_attention_update_timing(
     logger.info(
         "[H2O][rank=%s] attention graph update timing: step=%d path=%s "
         "num_tokens=%d layer_updates=%d elapsed_ms=%.3f "
+        "workspace_ms=%.3f graph_update_ms=%.3f "
         "block_table_shape=%s seq_lens_shape=%s",
         rank,
         _H2O_ATTENTION_UPDATE_TIMING_STEP,
@@ -129,6 +243,8 @@ def _log_h2o_attention_update_timing(
         num_tokens,
         layer_updates,
         elapsed_ms,
+        workspace_ms,
+        graph_update_ms,
         block_shape,
         seq_lens_shape,
     )
@@ -343,12 +459,20 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         track_h2o_request_state: bool = True,
         apply_h2o: bool = True,
     ) -> AscendMetadata:
+        h2o_timing_config = _get_h2o_debug_timing_config()
+        h2o_timings: dict[str, float] | None = {} if h2o_timing_config is not None else None
+        h2o_timing_started = (
+            _h2o_debug_timing_now(h2o_timing_config) if h2o_timing_config is not None else 0.0
+        )
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata, decode_threshold=self.decode_threshold
+        )
+        h2o_timing_started = _record_h2o_debug_timing(
+            h2o_timing_config, h2o_timings, "split_decodes_prefills", h2o_timing_started
         )
 
         block_table = common_attn_metadata.block_table_tensor
@@ -367,6 +491,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         # Get attn_mask and swa_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(self.model_config)
+        h2o_timing_started = _record_h2o_debug_timing(
+            h2o_timing_config, h2o_timings, "attention_mask", h2o_timing_started
+        )
 
         swa_mask = None
         is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
@@ -374,9 +501,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             swa_mask = self.attn_mask_builder.get_swa_mask(
                 self.model_config.dtype, self.model_config.hf_text_config.sliding_window
             )
+        h2o_timing_started = _record_h2o_debug_timing(
+            h2o_timing_config, h2o_timings, "swa_mask", h2o_timing_started
+        )
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        h2o_timing_started = _record_h2o_debug_timing(
+            h2o_timing_config, h2o_timings, "query_start_loc_h2d", h2o_timing_started
+        )
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -397,12 +530,40 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )
+        before_block_shape, before_seq_lens_shape = _metadata_tensor_shapes(attn_metadata)
+        h2o_timing_started = _record_h2o_debug_timing(
+            h2o_timing_config, h2o_timings, "metadata_object", h2o_timing_started
+        )
         if apply_h2o:
             self._maybe_apply_h2o(
                 attn_metadata,
                 common_attn_metadata,
                 track_request_state=track_h2o_request_state,
             )
+        h2o_timing_started = _record_h2o_debug_timing(
+            h2o_timing_config, h2o_timings, "h2o_apply", h2o_timing_started
+        )
+        after_block_shape, after_seq_lens_shape = _metadata_tensor_shapes(attn_metadata)
+        _log_h2o_metadata_build_timing(
+            h2o_timing_config,
+            path="runtime",
+            attn_state=attn_state,
+            num_reqs=num_reqs,
+            num_actual_tokens=num_actual_tokens,
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            apply_h2o=apply_h2o,
+            h2o_changed=(
+                before_block_shape != after_block_shape
+                or before_seq_lens_shape != after_seq_lens_shape
+            ),
+            before_block_shape=before_block_shape,
+            before_seq_lens_shape=before_seq_lens_shape,
+            after_block_shape=after_block_shape,
+            after_seq_lens_shape=after_seq_lens_shape,
+            timings=h2o_timings,
+        )
         return attn_metadata
 
     def _maybe_apply_h2o(
@@ -498,6 +659,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ):
+        h2o_timing_config = _get_h2o_debug_timing_config()
+        h2o_timings: dict[str, float] | None = {} if h2o_timing_config is not None else None
+        h2o_timing_started = (
+            _h2o_debug_timing_now(h2o_timing_config) if h2o_timing_config is not None else 0.0
+        )
         if attn_state in (
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.ChunkedPrefill,
@@ -514,7 +680,24 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 # capture so its compaction work is not charged to TTFT.
                 apply_h2o=False,
             )
+            h2o_timing_started = _record_h2o_debug_timing(
+                h2o_timing_config, h2o_timings, "build_dummy_metadata", h2o_timing_started
+            )
+            before_block_shape, before_seq_lens_shape = _metadata_tensor_shapes(attn_metadata)
             self._maybe_prepare_h2o_graph_capture(attn_metadata)
+            h2o_timing_started = _record_h2o_debug_timing(
+                h2o_timing_config, h2o_timings, "h2o_graph_capture_prepare", h2o_timing_started
+            )
+            after_block_shape, after_seq_lens_shape = _metadata_tensor_shapes(attn_metadata)
+            _log_h2o_graph_capture_timing(
+                h2o_timing_config,
+                attn_state=attn_state,
+                before_block_shape=before_block_shape,
+                before_seq_lens_shape=before_seq_lens_shape,
+                after_block_shape=after_block_shape,
+                after_seq_lens_shape=after_seq_lens_shape,
+                timings=h2o_timings,
+            )
         else:
             raise NotImplementedError(
                 "Currently we only support building dummy metadata for DecodeOnly and ChunkedPrefill state"
@@ -581,6 +764,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_graph_params()
             layer_updates = 0
+            workspace_ms = 0.0
+            graph_update_ms = 0.0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
@@ -602,6 +787,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     seq_lens = forward_context.attn_metadata[key].seq_lens
                     block_table = forward_context.attn_metadata[key].block_tables
 
+                    workspace_started = (
+                        _h2o_debug_timing_now(h2o_timing_config)
+                        if h2o_timing_config is not None
+                        else 0.0
+                    )
                     workspace = torch_npu._npu_paged_attention_get_workspace(
                         query=query,
                         key_cache=key_cache,
@@ -613,6 +803,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         context_lens=seq_lens,
                         out=output,
                     )
+                    if h2o_timing_config is not None:
+                        graph_update_started = _h2o_debug_timing_now(h2o_timing_config)
+                        workspace_ms += (graph_update_started - workspace_started) * 1000.0
+                    else:
+                        graph_update_started = 0.0
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu._npu_paged_attention(
                         query=query,
@@ -627,6 +822,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         workspace=workspace,
                     )
                     torch.npu.graph_task_update_end(update_stream)
+                    if h2o_timing_config is not None:
+                        graph_update_ms += (
+                            _h2o_debug_timing_now(h2o_timing_config) - graph_update_started
+                        ) * 1000.0
                     event.record(update_stream)
                     layer_updates += 1
             if h2o_timing_config is not None:
@@ -637,6 +836,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_tokens=num_tokens,
                     layer_updates=layer_updates,
                     elapsed_ms=elapsed_ms,
+                    workspace_ms=workspace_ms,
+                    graph_update_ms=graph_update_ms,
                     attn_metadata=forward_context.attn_metadata,
                 )
         else:
@@ -663,6 +864,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             attn_count = 0
             layer_updates = 0
+            graph_update_ms = 0.0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
@@ -697,6 +899,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
                         block_tables = attn_metadata[key].block_tables
 
+                    graph_update_started = (
+                        _h2o_debug_timing_now(h2o_timing_config)
+                        if h2o_timing_config is not None
+                        else 0.0
+                    )
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
@@ -716,6 +923,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=[attn_output, softmax_lse],
                     )
                     torch.npu.graph_task_update_end(update_stream)
+                    if h2o_timing_config is not None:
+                        graph_update_ms += (
+                            _h2o_debug_timing_now(h2o_timing_config) - graph_update_started
+                        ) * 1000.0
 
                     event.record(update_stream)
                     layer_updates += 1
@@ -727,6 +938,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_tokens=num_tokens,
                     layer_updates=layer_updates,
                     elapsed_ms=elapsed_ms,
+                    workspace_ms=0.0,
+                    graph_update_ms=graph_update_ms,
                     attn_metadata=attn_metadata,
                 )
 

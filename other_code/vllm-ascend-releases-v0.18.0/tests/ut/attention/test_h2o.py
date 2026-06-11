@@ -498,7 +498,35 @@ def test_h2o_pruner_auto_tune_lifts_ratio_budget_to_cap():
     assert new_lens_list == [64 * 128]
 
 
-def test_h2o_pruner_auto_tune_prunes_first_decode_by_default():
+def test_h2o_pruner_auto_tune_keeps_first_decode_full_by_default():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_ratio=0.1,
+        recent_ratio=0.1,
+        heavy_blocks=None,
+        recent_blocks=None,
+        decode_full_attention_steps=1,
+        auto_tune=True,
+        auto_tune_max_blocks=64,
+    )
+    block_tables = torch.arange(157, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([157 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["req-0"],
+    )
+
+    assert new_tables is block_tables
+    assert new_lens is seq_lens
+    assert new_lens_list == [157 * 128]
+    assert pruner._decode_steps["req-0"] == 1
+
+
+def test_h2o_pruner_auto_tune_can_prune_first_decode_when_warmup_disabled():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
         heavy_ratio=0.1,
@@ -591,13 +619,41 @@ def test_h2o_pruner_auto_tune_keeps_graph_capture_metadata_full_during_warmup():
     assert new_lens_list == [157 * 128]
 
 
-def test_h2o_pruner_auto_tune_compacts_graph_capture_metadata_by_default():
+def test_h2o_pruner_auto_tune_keeps_graph_capture_metadata_full_by_default():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
         heavy_ratio=0.1,
         recent_ratio=0.1,
         heavy_blocks=None,
         recent_blocks=None,
+        decode_full_attention_steps=1,
+        auto_tune=True,
+        auto_tune_max_blocks=64,
+    )
+    block_tables = torch.arange(157, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([157 * 128], dtype=torch.int32)
+
+    new_tables, new_lens, new_lens_list = pruner.build_graph_capture_metadata(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        seq_lens_list=[157 * 128],
+    )
+
+    assert torch.equal(new_tables, block_tables)
+    assert torch.equal(new_lens, seq_lens)
+    assert new_lens_list == [157 * 128]
+
+
+def test_h2o_pruner_auto_tune_can_compact_graph_capture_metadata_without_warmup():
+    pruner = H2OBlockPruner()
+    config = H2OConfigStub(
+        heavy_ratio=0.1,
+        recent_ratio=0.1,
+        heavy_blocks=None,
+        recent_blocks=None,
+        decode_full_attention_steps=0,
         auto_tune=True,
         auto_tune_max_blocks=64,
     )
