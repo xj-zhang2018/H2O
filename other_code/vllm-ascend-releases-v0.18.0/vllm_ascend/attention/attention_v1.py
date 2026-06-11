@@ -350,17 +350,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             return
         if not h2o_config.enabled:
             return
-        if _H2O_PROF_LOG:
-            req_ids = common_attn_metadata.request_ids
-            logger.info("[H2O-TTFT-PROF] _maybe_apply_h2o entry: block_tables.shape=%s, "
-                        "seq_lens.shape=%s, request_ids=%s (has_ids=%s, len=%s), "
-                        "decode_full_attention_steps=%s",
-                        str(attn_metadata.block_tables.shape),
-                        str(attn_metadata.seq_lens.shape) if attn_metadata.seq_lens is not None else "None",
-                        str(req_ids)[:50] if req_ids is not None else "None",
-                        str(req_ids is not None),
-                        str(len(req_ids)) if req_ids is not None else "0",
-                        str(getattr(h2o_config, 'decode_full_attention_steps', 'N/A')))
+        req_ids = common_attn_metadata.request_ids
+        logger.info("[H2O-TTFT-PROF] _maybe_apply_h2o entry: block_tables.shape=%s, "
+                    "seq_lens.shape=%s, request_ids=%s (has_ids=%s, len=%s), "
+                    "decode_full_attention_steps=%s",
+                    str(attn_metadata.block_tables.shape),
+                    str(attn_metadata.seq_lens.shape) if attn_metadata.seq_lens is not None else "None",
+                    str(req_ids)[:50] if req_ids is not None else "None",
+                    str(req_ids is not None),
+                    str(len(req_ids)) if req_ids is not None else "0",
+                    str(getattr(h2o_config, 'decode_full_attention_steps', 'N/A')))
 
         hf_text_config = getattr(self.model_config, "hf_text_config", None)
         if getattr(hf_text_config, "sliding_window", None) is not None:
@@ -385,10 +384,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             request_ids=common_attn_metadata.request_ids,
             seq_lens_list=attn_metadata.seq_lens_list,
         )
-        if _H2O_PROF_LOG:
-            logger.info("[H2O-TTFT-PROF] _maybe_apply_h2o done: new_bt_shape=%s, took=%.3fms",
-                        str(block_tables.shape),
-                        (_time_mod.perf_counter() - _t_h2o_entry) * 1000)
+        logger.info("[H2O-TTFT-PROF] _maybe_apply_h2o done: new_bt_shape=%s, took=%.3fms",
+                    str(block_tables.shape),
+                    (_time_mod.perf_counter() - _t_h2o_entry) * 1000)
         attn_metadata.block_tables = block_tables
         attn_metadata.seq_lens = seq_lens
         attn_metadata.seq_lens_cpu = seq_lens
