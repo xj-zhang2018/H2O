@@ -1232,7 +1232,7 @@ def test_h2o_pruner_fast_capped_profile_keeps_long_context_active():
     assert hundred_k_new_lens_list == [63 * 128 + 32]
 
 
-def test_h2o_pruner_ttft_profile_prunes_20k_on_first_decode():
+def test_h2o_pruner_prunes_20k_on_first_decode_when_auto_tune_warmup_disabled():
     pruner = H2OBlockPruner()
     config = H2OConfigStub(
         heavy_blocks=24,
@@ -1252,6 +1252,7 @@ def test_h2o_pruner_ttft_profile_prunes_20k_on_first_decode():
         decode_budget_fast_blocks=32,
         decode_budget_fast_ratio=0.25,
         decode_budget_fast_max_blocks=64,
+        auto_tune_decode_warmup_steps=0,
         decode_budget_taper_steps=0,
         decode_budget_taper_start_step=0,
         selection_refresh_interval=128,
@@ -1274,6 +1275,64 @@ def test_h2o_pruner_ttft_profile_prunes_20k_on_first_decode():
     assert new_lens.tolist() == [40 * 128]
     assert new_lens_list == [40 * 128]
     assert pruner._decode_steps["twenty-k"] == 1
+
+
+def test_h2o_pruner_auto_tune_warmup_keeps_long_context_full_then_prunes():
+    pruner = H2OBlockPruner()
+    warmup_steps = 32
+    config = H2OConfigStub(
+        heavy_blocks=24,
+        recent_blocks=24,
+        max_blocks=32,
+        adaptive_min_keep_ratio=0.0,
+        adaptive_precision_ratio=0.0,
+        adaptive_precision_max_blocks=None,
+        min_prune_ratio=0.50,
+        min_metadata_prune_ratio=0.05,
+        history_cluster_size=2,
+        sink_blocks=8,
+        anchor_ratio=0.25,
+        score_explore_ratio=0.25,
+        score_coverage_ratio=0.50,
+        decode_full_attention_steps=0,
+        decode_budget_fast_blocks=32,
+        decode_budget_fast_ratio=0.25,
+        decode_budget_fast_max_blocks=64,
+        auto_tune_decode_warmup_steps=warmup_steps,
+        decode_budget_taper_steps=0,
+        decode_budget_taper_start_step=0,
+        selection_refresh_interval=128,
+    )
+    block_tables = torch.arange(160, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([160 * 128], dtype=torch.int32)
+
+    for _ in range(warmup_steps):
+        warm_tables, warm_lens, warm_lens_list = pruner.apply(
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            block_size=128,
+            config=config,
+            request_ids=["twenty-k"],
+        )
+        assert warm_tables is block_tables
+        assert warm_lens is seq_lens
+        assert warm_lens_list == [160 * 128]
+
+    new_tables, new_lens, new_lens_list = pruner.apply(
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        block_size=128,
+        config=config,
+        request_ids=["twenty-k"],
+    )
+
+    assert new_tables is not block_tables
+    assert new_tables.shape == (1, 64)
+    assert new_tables[0, :40].tolist()[-24:] == list(range(136, 160))
+    assert new_tables[0, 40:].tolist() == [0] * 24
+    assert new_lens.tolist() == [40 * 128]
+    assert new_lens_list == [40 * 128]
+    assert pruner._decode_steps["twenty-k"] == warmup_steps + 1
 
 
 def test_h2o_pruner_skips_mixed_warmup_batch_that_would_force_full_metadata_width():

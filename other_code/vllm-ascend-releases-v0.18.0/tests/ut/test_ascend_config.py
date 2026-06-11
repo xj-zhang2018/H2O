@@ -47,7 +47,7 @@ class TestAscendConfig(TestBase):
         self.assertIsNone(ascend_config.h2o_config.max_prune_seq_len)
         self.assertTrue(ascend_config.h2o_config.auto_tune)
         self.assertEqual(ascend_config.h2o_config.auto_tune_max_blocks, 64)
-        self.assertEqual(ascend_config.h2o_config.auto_tune_decode_warmup_steps, 0)
+        self.assertEqual(ascend_config.h2o_config.auto_tune_decode_warmup_steps, 32)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)

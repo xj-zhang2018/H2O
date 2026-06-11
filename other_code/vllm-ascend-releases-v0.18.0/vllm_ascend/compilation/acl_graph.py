@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
+import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -21,6 +23,72 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import weak_ref_tensors
+
+_H2O_ACLGRAPH_TIMING_STEP = 0
+
+
+def _get_h2o_debug_timing_config():
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        h2o_config = get_ascend_config().h2o_config
+    except Exception:
+        return None
+    if h2o_config.enabled and getattr(h2o_config, "debug_timing", False):
+        return h2o_config
+    return None
+
+
+def _h2o_debug_timing_now(h2o_config) -> float:
+    if getattr(h2o_config, "debug_timing_sync", False):
+        try:
+            torch.npu.synchronize()
+        except Exception:  # pragma: no cover - diagnostic-only best effort
+            pass
+    return time.perf_counter()
+
+
+def _mode_name(mode) -> str:
+    return getattr(mode, "name", str(mode))
+
+
+def _log_h2o_aclgraph_timing(
+    h2o_config,
+    *,
+    path: str,
+    wrapper_mode,
+    runtime_mode,
+    batch_descriptor,
+    entry_count: int,
+    capture_ms: float,
+    direct_ms: float,
+    sync_ms: float,
+    replay_ms: float,
+    total_ms: float,
+) -> None:
+    global _H2O_ACLGRAPH_TIMING_STEP
+    _H2O_ACLGRAPH_TIMING_STEP += 1
+    interval = getattr(h2o_config, "debug_interval", 1)
+    if path != "capture" and _H2O_ACLGRAPH_TIMING_STEP != 1 and _H2O_ACLGRAPH_TIMING_STEP % interval != 0:
+        return
+    rank = os.getenv("RANK", os.getenv("LOCAL_RANK", "unknown"))
+    logger.info(
+        "[H2O][rank=%s] aclgraph timing: step=%d path=%s "
+        "wrapper_mode=%s runtime_mode=%s batch_descriptor=%s entries=%d "
+        "capture_ms=%.3f direct_ms=%.3f sync_ms=%.3f replay_ms=%.3f total_ms=%.3f",
+        rank,
+        _H2O_ACLGRAPH_TIMING_STEP,
+        path,
+        _mode_name(wrapper_mode),
+        _mode_name(runtime_mode),
+        batch_descriptor,
+        entry_count,
+        capture_ms,
+        direct_ms,
+        sync_ms,
+        replay_ms,
+        total_ms,
+    )
 
 
 @dataclasses.dataclass
@@ -110,6 +178,8 @@ class ACLGraphWrapper:
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        h2o_config = _get_h2o_debug_timing_config()
+        total_started = _h2o_debug_timing_now(h2o_config) if h2o_config is not None else 0.0
 
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
@@ -118,7 +188,25 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
-            return self.runnable(*args, **kwargs)
+            direct_started = _h2o_debug_timing_now(h2o_config) if h2o_config is not None else 0.0
+            output = self.runnable(*args, **kwargs)
+            if h2o_config is not None:
+                direct_ms = (_h2o_debug_timing_now(h2o_config) - direct_started) * 1000.0
+                total_ms = (_h2o_debug_timing_now(h2o_config) - total_started) * 1000.0
+                _log_h2o_aclgraph_timing(
+                    h2o_config,
+                    path="direct",
+                    wrapper_mode=self.runtime_mode,
+                    runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
+                    entry_count=len(self.concrete_aclgraph_entries),
+                    capture_ms=0.0,
+                    direct_ms=direct_ms,
+                    sync_ms=0.0,
+                    replay_ms=0.0,
+                    total_ms=total_ms,
+                )
+            return output
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
             # create a new entry for this batch descriptor
@@ -127,6 +215,7 @@ class ACLGraphWrapper:
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
         if entry.aclgraph is None:
+            capture_started = _h2o_debug_timing_now(h2o_config) if h2o_config is not None else 0.0
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -178,6 +267,22 @@ class ACLGraphWrapper:
             entry.aclgraph = aclgraph
 
             compilation_counter.num_cudagraph_captured += 1
+            if h2o_config is not None:
+                capture_ms = (_h2o_debug_timing_now(h2o_config) - capture_started) * 1000.0
+                total_ms = (_h2o_debug_timing_now(h2o_config) - total_started) * 1000.0
+                _log_h2o_aclgraph_timing(
+                    h2o_config,
+                    path="capture",
+                    wrapper_mode=self.runtime_mode,
+                    runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=entry.batch_descriptor,
+                    entry_count=len(self.concrete_aclgraph_entries),
+                    capture_ms=capture_ms,
+                    direct_ms=0.0,
+                    sync_ms=0.0,
+                    replay_ms=0.0,
+                    total_ms=total_ms,
+                )
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
@@ -204,9 +309,30 @@ class ACLGraphWrapper:
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+        sync_ms = 0.0
         if not self.enable_enpu and not is_draft_eagle:
+            sync_started = _h2o_debug_timing_now(h2o_config) if h2o_config is not None else 0.0
             torch.npu.current_stream().synchronize()
+            if h2o_config is not None:
+                sync_ms = (_h2o_debug_timing_now(h2o_config) - sync_started) * 1000.0
+        replay_started = _h2o_debug_timing_now(h2o_config) if h2o_config is not None else 0.0
         entry.aclgraph.replay()
+        if h2o_config is not None:
+            replay_ms = (_h2o_debug_timing_now(h2o_config) - replay_started) * 1000.0
+            total_ms = (_h2o_debug_timing_now(h2o_config) - total_started) * 1000.0
+            _log_h2o_aclgraph_timing(
+                h2o_config,
+                path="replay",
+                wrapper_mode=self.runtime_mode,
+                runtime_mode=aclgraph_runtime_mode,
+                batch_descriptor=entry.batch_descriptor,
+                entry_count=len(self.concrete_aclgraph_entries),
+                capture_ms=0.0,
+                direct_ms=0.0,
+                sync_ms=sync_ms,
+                replay_ms=replay_ms,
+                total_ms=total_ms,
+            )
         return entry.output
 
 
